@@ -1,8 +1,8 @@
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image
 import pytesseract
+import re
 
 # 클라우드 배포 시 주석 처리 필요
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -14,16 +14,45 @@ def reset_app():
         del st.session_state[key]
     st.rerun()
 
+def preprocess_for_ocr(img):
+    """OCR 인식률을 극대화하기 위한 이미지 전처리"""
+    # 1. 해상도 2배 확대 (글자를 크게 만들어 인식률 향상)
+    scale_factor = 2
+    img_resized = cv2.resize(img, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
+    
+    # 2. 흑백 변환 및 이진화 (배경은 하얗게, 글자는 검게)
+    gray = cv2.cvtColor(img_resized, cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+    
+    return thresh, scale_factor
+
+def clean_text(text):
+    """특수기호와 공백을 모두 제거하고 순수 문자만 반환"""
+    text = str(text).replace(" ", "")
+    # 한글, 영문, 숫자만 남기고 모두 제거 (예: '[제목]:' -> '제목')
+    clean = re.sub(r'[^가-힣a-zA-Z0-9]', '', text)
+    return clean
+
 def find_word_location(img, target_word):
-    """이미지에서 특정 단어의 x, y 좌표를 찾아 반환합니다."""
-    # OCR 인식률을 높이기 위해 흑백 처리
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    d = pytesseract.image_to_data(gray, lang='kor+eng', output_type=pytesseract.Output.DICT)
+    """향상된 OCR로 이미지에서 특정 단어의 x, y 좌표를 찾습니다."""
+    processed_img, scale = preprocess_for_ocr(img)
+    
+    # --psm 6: 하나의 텍스트 블록으로 인식하도록 강제 (공문서 형태에 적합)
+    custom_config = r'--oem 3 --psm 6'
+    d = pytesseract.image_to_data(processed_img, lang='kor+eng', config=custom_config, output_type=pytesseract.Output.DICT)
+    
+    target_clean = clean_text(target_word)
     
     for i in range(len(d['text'])):
-        # 인식된 텍스트에 목표 단어가 포함되어 있는지 확인
-        if target_word in str(d['text'][i]).replace(" ", ""):
-            return d['left'][i], d['top'][i]
+        current_text = clean_text(d['text'][i])
+        
+        # 정제된 텍스트 안에 목표 단어가 포함되어 있다면
+        if target_clean and target_clean in current_text:
+            # 해상도를 2배 키웠으므로, 원본 이미지에 맞는 좌표로 다시 나누어 반환
+            original_x = int(d['left'][i] / scale)
+            original_y = int(d['top'][i] / scale)
+            return original_x, original_y
+            
     return None, None
 
 st.title("🎯 스마트 문서 이미지 겹쳐보기 (자동 정렬)")
@@ -67,14 +96,13 @@ if uploaded_file:
     left_img = image[:, :mid]
     right_img = image[:, mid:]
     
-    # 두 이미지 크기 맞추기
     min_w = min(left_img.shape[1], right_img.shape[1])
     left_img = left_img[:, :min_w]
     right_img = right_img[:, :min_w]
 
     st.subheader("🔍 분석 및 겹쳐보기 결과")
     
-    with st.spinner(f"'{anchor_word}' 단어를 찾아 이미지를 정렬하는 중입니다..."):
+    with st.spinner(f"'{anchor_word}' 단어를 찾아 이미지를 정렬하는 중입니다... (OCR 분석 중)"):
         # 1. 기준 단어 좌표 찾기
         lx, ly = find_word_location(left_img, anchor_word)
         rx, ry = find_word_location(right_img, anchor_word)
@@ -86,16 +114,22 @@ if uploaded_file:
             dx = lx - rx  # 가로 이동량
             dy = ly - ry  # 세로 이동량
             
-            # 이동 변환 행렬 생성 (x축으로 dx, y축으로 dy 만큼 이동)
             M = np.float32([[1, 0, dx], [0, 1, dy]])
-            
-            # 이미지 이동 적용 (빈 공간은 흰색(255,255,255)으로 채움)
             rows, cols = right_img.shape[:2]
             aligned_right_img = cv2.warpAffine(right_img, M, (cols, rows), borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
             
-            st.success(f"✅ '{anchor_word}' 단어를 기준으로 정렬 완료! (X축 보정: {dx}px, Y축 보정: {dy}px)")
+            st.success(f"✅ '{anchor_word}' 단어를 기준으로 정렬 완료! (보정: 가로 {dx}px, 세로 {dy}px 이동)")
         else:
-            st.warning(f"⚠️ 양쪽 문서에서 '{anchor_word}' 단어를 찾지 못해 기본 위치 그대로 겹칩니다. 다른 기준 단어를 입력해 보세요.")
+            # 실패 원인을 더 구체적으로 안내
+            error_msg = f"⚠️ 양쪽 문서에서 '{anchor_word}' 단어를 모두 찾지는 못했습니다. "
+            if lx is None and rx is None:
+                error_msg += "양쪽 모두 실패했습니다."
+            elif lx is None:
+                error_msg += "왼쪽(초안)에서 찾지 못했습니다."
+            else:
+                error_msg += "오른쪽(수정안)에서 찾지 못했습니다."
+            error_msg += " ('관련'이나 '붙임' 등 다른 단어를 시도해 보세요.)"
+            st.warning(error_msg)
 
         # 3. 오버레이 처리
         if blend_mode == "차이점 강조 (Difference)":
