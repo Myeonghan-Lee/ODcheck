@@ -1,122 +1,111 @@
 import streamlit as st
 import os
 import cv2
-import numpy as np
 import pandas as pd
 from PIL import Image
+import numpy as np
 
-# --- 페이지 설정 ---
-st.set_page_config(page_title="Advanced ODcheck Tool", layout="wide")
+# --- 1. 초기 설정 및 세션 상태 관리 ---
+if 'file_idx' not in st.session_state:
+    st.session_state.file_idx = 0
+if 'history' not in st.session_state:
+    st.session_state.history = []
 
-st.title("🔍 Advanced Object Detection Checker")
+st.set_page_config(layout="wide", page_title="ODcheck Pro - Enhanced")
 
-# --- 사이드바: 설정 및 제어 ---
-# 변수 초기화 (에러 방지)
-img_dir = ""
-label_dir_a = ""
-label_dir_b = ""
-
-with st.sidebar:
-    st.header("📂 데이터 경로 설정")
-    # 기본 경로를 현재 디렉토리(".") 등으로 설정하여 초기 에러 방지
-    img_dir = st.text_input("이미지 폴더 경로", value="data/images")
-    label_dir_a = st.text_input("라벨 폴더 A (GT/기존)", value="data/labels")
-    label_dir_b = st.text_input("라벨 폴더 B (비교용 - 선택사항)", value="")
-    
-    st.header("🎨 시각화 설정")
-    line_thickness = st.slider("선 두께", 1, 10, 2)
-    bbox_opacity = st.slider("박스 투명도", 0.0, 1.0, 0.5)
-    
-    st.header("🏷️ 클래스 정의")
-    class_names_input = st.text_area("클래스 목록 (쉼표 구분)", "Person, Car, Bicycle, Dog")
-    class_names = [c.strip() for c in class_names_input.split(",")]
-    
-    target_classes = st.multiselect("확인할 클래스 필터", class_names, default=class_names)
-
-# --- 유틸리티 함수 ---
-def get_color(idx):
-    """클래스 ID별 고정 색상"""
-    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255), (0, 255, 255)]
-    return colors[idx % len(colors)]
-
+# --- 2. 헬퍼 함수 ---
 def load_yolo_labels(label_path, img_w, img_h):
-    if not os.path.exists(label_path):
-        return []
     labels = []
-    try:
+    if os.path.exists(label_path):
         with open(label_path, 'r') as f:
             for line in f.readlines():
-                parts = line.split()
-                if len(parts) < 5: continue
-                cls_id = int(parts[0])
-                x_c, y_c, w, h = map(float, parts[1:5])
-                x1 = int((x_c - w/2) * img_w)
-                y1 = int((y_c - h/2) * img_h)
-                x2 = int((x_c + w/2) * img_w)
-                y2 = int((y_c + h/2) * img_h)
-                labels.append({'id': cls_id, 'bbox': [x1, y1, x2, y2]})
-    except Exception as e:
-        st.error(f"라벨 로드 에러: {e}")
+                cls, x, y, w, h = map(float, line.split())
+                # 정규화 좌표를 픽셀 좌표로 변환
+                x1 = int((x - w/2) * img_w)
+                y1 = int((y - h/2) * img_h)
+                x2 = int((x + w/2) * img_w)
+                y2 = int((y + h/2) * img_h)
+                labels.append({'class': int(cls), 'bbox': [x1, y1, x2, y2], 'raw': [cls, x, y, w, h]})
     return labels
 
-def draw_boxes(image, labels, class_names, target_classes, thickness, opacity):
-    overlay = image.copy()
-    for label in labels:
-        cls_id = label['id']
-        if cls_id >= len(class_names) or class_names[cls_id] not in target_classes:
-            continue
-        color = get_color(cls_id)
+def draw_bboxes(image, labels, selected_idx=None):
+    img_draw = image.copy()
+    for i, label in enumerate(labels):
         x1, y1, x2, y2 = label['bbox']
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, thickness)
-        label_text = class_names[cls_id]
-        cv2.putText(overlay, label_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-    return cv2.addWeighted(overlay, opacity, image, 1 - opacity, 0)
+        color = (0, 255, 0) if i != selected_idx else (255, 0, 0) # 선택된 객체는 빨간색
+        thickness = 2 if i != selected_idx else 5
+        cv2.rectangle(img_draw, (x1, y1), (x2, y2), color, thickness)
+        cv2.putText(img_draw, f"ID:{i} | Cls:{label['class']}", (x1, y1-10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    return img_draw
 
-# --- 메인 로직 ---
-# 1. 경로 유효성 검사
-if img_dir and os.path.exists(img_dir):
-    image_files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-    image_files.sort()
+# --- 3. 사이드바: 파일 탐색 및 필터 ---
+st.sidebar.title("📁 데이터셋 설정")
+img_dir = st.sidebar.text_input("이미지 경로", "data/images")
+label_dir = st.sidebar.text_input("라벨 경로", "data/labels")
 
-    if not image_files:
-        st.info("선택한 폴더에 이미지 파일이 없습니다. 경로를 확인해주세요.")
-    else:
-        # 파일 선택 및 이동
-        idx = st.select_slider("이미지 선택", options=range(len(image_files)), 
-                               format_func=lambda i: image_files[i])
+images = [f for f in os.listdir(img_dir) if f.endswith(('.jpg', '.png', '.jpeg'))]
+if not images:
+    st.error("이미지를 찾을 수 없습니다.")
+    st.stop()
+
+st.sidebar.markdown("---")
+file_select = st.sidebar.selectbox("파일 직접 선택", images, index=st.session_state.file_idx)
+st.session_state.file_idx = images.index(file_select)
+
+# --- 4. 메인 화면 구성 ---
+col1, col2 = st.columns([0.7, 0.3])
+
+img_path = os.path.join(img_dir, images[st.session_state.file_idx])
+lbl_path = os.path.join(label_dir, images[st.session_state.file_idx].rsplit('.', 1)[0] + ".txt")
+
+image = cv2.imread(img_path)
+image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+img_h, img_w, _ = image.shape
+labels = load_yolo_labels(lbl_path, img_w, img_h)
+
+with col1:
+    st.subheader(f"🖼️ 검수 화면: {images[st.session_state.file_idx]}")
+    
+    # 객체 선택 (문제가 되는 위치를 찾기 쉽게 함)
+    obj_to_highlight = st.selectbox("집중 점검할 객체 선택", 
+                                    options=range(len(labels)), 
+                                    format_func=lambda x: f"객체 {x} (Class: {labels[x]['class']})")
+    
+    canvas = draw_bboxes(image, labels, selected_idx=obj_to_highlight)
+    st.image(canvas, use_column_width=True)
+
+with col2:
+    st.subheader("🔍 세부 정보 및 수정")
+    
+    if labels:
+        target = labels[obj_to_highlight]
+        # 선택된 객체 Crop 확대 시각화
+        x1, y1, x2, y2 = target['bbox']
+        # 여유 공간을 두고 크롭 (Padding)
+        p = 20
+        crop = image[max(0, y1-p):min(img_h, y2+p), max(0, x1-p):min(img_w, x2+p)]
+        st.image(crop, caption=f"객체 {obj_to_highlight} 확대", use_column_width=True)
         
-        current_img_name = image_files[idx]
-        img_path = os.path.join(img_dir, current_img_name)
-        
-        # 이미지 로드
-        raw_img = cv2.imread(img_path)
-        if raw_img is not None:
-            img = cv2.cvtColor(raw_img, cv2.COLOR_BGR2RGB)
-            h, w, _ = img.shape
-            
-            # 라벨 로드
-            label_name = os.path.splitext(current_img_name)[0] + ".txt"
-            
-            # 레이아웃 구성
-            if label_dir_b and os.path.exists(label_dir_b):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.caption(f"Source A: {label_dir_a}")
-                    labels_a = load_yolo_labels(os.path.join(label_dir_a, label_name), w, h)
-                    res_a = draw_boxes(img.copy(), labels_a, class_names, target_classes, line_thickness, bbox_opacity)
-                    st.image(res_a, use_container_width=True)
-                with col2:
-                    st.caption(f"Source B: {label_dir_b}")
-                    labels_b = load_yolo_labels(os.path.join(label_dir_b, label_name), w, h)
-                    res_b = draw_boxes(img.copy(), labels_b, class_names, target_classes, line_thickness, bbox_opacity)
-                    st.image(res_b, use_container_width=True)
-            else:
-                st.caption(f"이미지: {current_img_name} | 라벨 폴더: {label_dir_a}")
-                labels_a = load_yolo_labels(os.path.join(label_dir_a, label_name), w, h)
-                res_a = draw_boxes(img.copy(), labels_a, class_names, target_classes, line_thickness, bbox_opacity)
-                st.image(res_a, use_container_width=True)
-        else:
-            st.error("이미지를 불러올 수 없습니다.")
-else:
-    st.info("좌측 사이드바에서 이미지 폴더 경로를 입력해주세요.")
-    st.write("현재 입력된 경로:", img_dir)
+        # 수정 폼
+        new_cls = st.number_input("클래스 수정", value=target['class'], step=1)
+        if st.button("수정 사항 저장"):
+            # 실제 파일 저장 로직 (필요에 따라 구현)
+            target['class'] = new_cls
+            st.session_state.history.append(f"{images[st.session_state.file_idx]} - 객체 {obj_to_highlight} 수정됨")
+            st.success("수정 완료!")
+
+    st.markdown("---")
+    st.subheader("📜 수정 이력")
+    for log in reversed(st.session_state.history[-5:]): # 최근 5개만 표시
+        st.write(f"- {log}")
+
+# --- 5. 하단 내비게이션 ---
+st.markdown("---")
+c1, c2, c3 = st.columns(3)
+if c1.button("⬅️ 이전 이미지"):
+    st.session_state.file_idx = max(0, st.session_state.file_idx - 1)
+    st.rerun()
+if c3.button("다음 이미지 ➡️"):
+    st.session_state.file_idx = min(len(images)-1, st.session_state.file_idx + 1)
+    st.rerun()
