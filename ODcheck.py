@@ -1,111 +1,136 @@
 import streamlit as st
-import os
 import cv2
-import pandas as pd
-from PIL import Image
 import numpy as np
+from PIL import Image
+import pandas as pd
+import io
 
-# --- 1. 초기 설정 및 세션 상태 관리 ---
-if 'file_idx' not in st.session_state:
-    st.session_state.file_idx = 0
+# --- 1. 페이지 설정 ---
+st.set_page_config(layout="wide", page_title="ODcheck Pro - Multi Source")
+
 if 'history' not in st.session_state:
     st.session_state.history = []
 
-st.set_page_config(layout="wide", page_title="ODcheck Pro - Enhanced")
-
-# --- 2. 헬퍼 함수 ---
-def load_yolo_labels(label_path, img_w, img_h):
+# --- 2. 유틸리티 함수 ---
+def parse_yolo_labels(label_text, img_w, img_h):
+    """YOLO 텍스트 데이터를 리스트로 변환"""
     labels = []
-    if os.path.exists(label_path):
-        with open(label_path, 'r') as f:
-            for line in f.readlines():
-                cls, x, y, w, h = map(float, line.split())
-                # 정규화 좌표를 픽셀 좌표로 변환
-                x1 = int((x - w/2) * img_w)
-                y1 = int((y - h/2) * img_h)
-                x2 = int((x + w/2) * img_w)
-                y2 = int((y + h/2) * img_h)
-                labels.append({'class': int(cls), 'bbox': [x1, y1, x2, y2], 'raw': [cls, x, y, w, h]})
+    if not label_text:
+        return labels
+    lines = label_text.strip().split('\n')
+    for i, line in enumerate(lines):
+        parts = line.split()
+        if len(parts) == 5:
+            cls, x, y, w, h = map(float, parts)
+            x1 = int((x - w/2) * img_w)
+            y1 = int((y - h/2) * img_h)
+            x2 = int((x + w/2) * img_w)
+            y2 = int((y + h/2) * img_h)
+            labels.append({'id': i, 'class': int(cls), 'bbox': [x1, y1, x2, y2], 'raw': [cls, x, y, w, h]})
     return labels
 
-def draw_bboxes(image, labels, selected_idx=None):
+def draw_bboxes(image, labels, selected_id=None):
+    """이미지에 바운딩 박스 시각화 (선택된 박스는 강조)"""
     img_draw = image.copy()
-    for i, label in enumerate(labels):
+    for label in labels:
         x1, y1, x2, y2 = label['bbox']
-        color = (0, 255, 0) if i != selected_idx else (255, 0, 0) # 선택된 객체는 빨간색
-        thickness = 2 if i != selected_idx else 5
+        is_selected = (label['id'] == selected_id)
+        color = (255, 0, 0) if is_selected else (0, 255, 0)
+        thickness = 4 if is_selected else 2
         cv2.rectangle(img_draw, (x1, y1), (x2, y2), color, thickness)
-        cv2.putText(img_draw, f"ID:{i} | Cls:{label['class']}", (x1, y1-10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        # 텍스트 배경
+        label_str = f"ID:{label['id']} Cls:{label['class']}"
+        cv2.putText(img_draw, label_str, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     return img_draw
 
-# --- 3. 사이드바: 파일 탐색 및 필터 ---
-st.sidebar.title("📁 데이터셋 설정")
-img_dir = st.sidebar.text_input("이미지 경로", "data/images")
-label_dir = st.sidebar.text_input("라벨 경로", "data/labels")
+# --- 3. 사이드바: 입력 소스 선택 ---
+st.sidebar.title("📥 입력 소스 설정")
+input_mode = st.sidebar.radio("이미지 불러오기 방식", ["파일 업로드", "카메라 캡처", "로컬 경로(기존)"])
 
-images = [f for f in os.listdir(img_dir) if f.endswith(('.jpg', '.png', '.jpeg'))]
-if not images:
-    st.error("이미지를 찾을 수 없습니다.")
-    st.stop()
+img_array = None
+label_input = ""
 
+if input_mode == "파일 업로드":
+    uploaded_file = st.sidebar.file_uploader("이미지 파일 선택", type=['jpg', 'jpeg', 'png'])
+    if uploaded_file:
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        img_array = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+
+elif input_mode == "카메라 캡처":
+    camera_file = st.sidebar.camera_input("이미지 캡처")
+    if camera_file:
+        file_bytes = np.asarray(bytearray(camera_file.read()), dtype=np.uint8)
+        img_array = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+
+else: # 로컬 경로
+    img_dir = st.sidebar.text_input("이미지 폴더 경로", "data/images")
+    if os.path.exists(img_dir):
+        files = [f for f in os.listdir(img_dir) if f.endswith(('.jpg', '.png'))]
+        sel_file = st.sidebar.selectbox("파일 선택", files)
+        if sel_file:
+            img_array = cv2.imread(os.path.join(img_dir, sel_file))
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB)
+
+# 라벨 입력 섹션
 st.sidebar.markdown("---")
-file_select = st.sidebar.selectbox("파일 직접 선택", images, index=st.session_state.file_idx)
-st.session_state.file_idx = images.index(file_select)
+st.sidebar.subheader("🏷️ 라벨링 데이터 (YOLO)")
+label_method = st.sidebar.radio("라벨 불러오기 방식", ["텍스트 직접 붙여넣기", "파일 업로드"])
+
+if label_method == "텍스트 직접 붙여넣기":
+    label_input = st.sidebar.text_area("YOLO 라벨 내용 입력", placeholder="0 0.5 0.5 0.2 0.2", height=150)
+else:
+    uploaded_lbl = st.sidebar.file_uploader("라벨 파일(.txt) 선택", type=['txt'])
+    if uploaded_lbl:
+        label_input = uploaded_lbl.getvalue().decode("utf-8")
 
 # --- 4. 메인 화면 구성 ---
-col1, col2 = st.columns([0.7, 0.3])
-
-img_path = os.path.join(img_dir, images[st.session_state.file_idx])
-lbl_path = os.path.join(label_dir, images[st.session_state.file_idx].rsplit('.', 1)[0] + ".txt")
-
-image = cv2.imread(img_path)
-image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-img_h, img_w, _ = image.shape
-labels = load_yolo_labels(lbl_path, img_w, img_h)
-
-with col1:
-    st.subheader(f"🖼️ 검수 화면: {images[st.session_state.file_idx]}")
+if img_array is not None:
+    h, w, _ = img_array.shape
+    labels = parse_yolo_labels(label_input, w, h)
     
-    # 객체 선택 (문제가 되는 위치를 찾기 쉽게 함)
-    obj_to_highlight = st.selectbox("집중 점검할 객체 선택", 
-                                    options=range(len(labels)), 
-                                    format_func=lambda x: f"객체 {x} (Class: {labels[x]['class']})")
-    
-    canvas = draw_bboxes(image, labels, selected_idx=obj_to_highlight)
-    st.image(canvas, use_column_width=True)
+    col1, col2 = st.columns([0.6, 0.4])
 
-with col2:
-    st.subheader("🔍 세부 정보 및 수정")
-    
-    if labels:
-        target = labels[obj_to_highlight]
-        # 선택된 객체 Crop 확대 시각화
-        x1, y1, x2, y2 = target['bbox']
-        # 여유 공간을 두고 크롭 (Padding)
-        p = 20
-        crop = image[max(0, y1-p):min(img_h, y2+p), max(0, x1-p):min(img_w, x2+p)]
-        st.image(crop, caption=f"객체 {obj_to_highlight} 확대", use_column_width=True)
+    with col1:
+        st.subheader("🖼️ 원본 및 탐지 결과")
+        # 객체 선택용 리스트 (찾기 편하도록 ID 부여)
+        selected_id = st.selectbox("집중 점검할 객체 선택 (ID)", options=[l['id'] for l in labels] if labels else [None])
         
-        # 수정 폼
-        new_cls = st.number_input("클래스 수정", value=target['class'], step=1)
-        if st.button("수정 사항 저장"):
-            # 실제 파일 저장 로직 (필요에 따라 구현)
-            target['class'] = new_cls
-            st.session_state.history.append(f"{images[st.session_state.file_idx]} - 객체 {obj_to_highlight} 수정됨")
-            st.success("수정 완료!")
+        canvas = draw_bboxes(img_array, labels, selected_id)
+        st.image(canvas, use_column_width=True)
 
-    st.markdown("---")
-    st.subheader("📜 수정 이력")
-    for log in reversed(st.session_state.history[-5:]): # 최근 5개만 표시
-        st.write(f"- {log}")
+    with col2:
+        st.subheader("🔍 정밀 분석 및 수정")
+        
+        if labels and selected_id is not None:
+            target = next(l for l in labels if l['id'] == selected_id)
+            x1, y1, x2, y2 = target['bbox']
+            
+            # 1. 자동 확대 기능 (Zoom-in)
+            pad = 50
+            crop = img_array[max(0, y1-pad):min(h, y2+pad), max(0, x1-pad):min(w, x2+pad)]
+            st.image(crop, caption=f"ID {selected_id} 확대 화면", use_column_width=True)
+            
+            # 2. 데이터 요약 정보 테이블
+            df = pd.DataFrame(labels)
+            st.dataframe(df[['id', 'class', 'raw']], use_container_width=True)
+            
+            # 3. 수정 및 기록
+            new_cls = st.number_input("클래스 ID 수정", value=target['class'], step=1)
+            if st.button("수정 사항 기록"):
+                change_log = f"ID {selected_id}: {target['class']} -> {new_cls}"
+                st.session_state.history.append(change_log)
+                st.success(f"기록됨: {change_log}")
 
-# --- 5. 하단 내비게이션 ---
-st.markdown("---")
-c1, c2, c3 = st.columns(3)
-if c1.button("⬅️ 이전 이미지"):
-    st.session_state.file_idx = max(0, st.session_state.file_idx - 1)
-    st.rerun()
-if c3.button("다음 이미지 ➡️"):
-    st.session_state.file_idx = min(len(images)-1, st.session_state.file_idx + 1)
-    st.rerun()
+        # 4. 수정 이력 보기
+        st.markdown("---")
+        with st.expander("📝 최근 수정 이력", expanded=True):
+            if st.session_state.history:
+                for h in reversed(st.session_state.history[-10:]):
+                    st.write(f"• {h}")
+            else:
+                st.info("수정 이력이 없습니다.")
+
+else:
+    st.info("이미지를 업로드하거나 카메라를 사용해 보세요.")
