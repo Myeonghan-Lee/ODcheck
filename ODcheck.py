@@ -2,61 +2,103 @@ import streamlit as st
 import cv2
 import numpy as np
 import pytesseract
+import base64
+from io import BytesIO
 from PIL import Image
-import io
+import streamlit.components.v1 as components
 
-# Tesseract 경로 설정 (윈도우 환경에서 필요시 주석 해제)
+# Tesseract 경로 설정 (필요시)
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 st.set_page_config(page_title="AI 문서 비교 검수기", layout="wide")
 
+# --- JavaScript Screen Capture Component ---
+def screen_capture_js():
+    """브라우저의 getDisplayMedia API를 사용하여 화면을 캡처하는 JS 코드"""
+    js_code = """
+    <div style="margin-bottom: 10px;">
+        <button id="captureBtn" style="
+            background-color: #ff4b4b; color: white; border: none; 
+            padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold;">
+            📸 화면 캡처(공유) 시작
+        </button>
+        <video id="video" style="display:none;" autoplay></video>
+        <canvas id="canvas" style="display:none;"></canvas>
+    </div>
+
+    <script>
+    const captureBtn = document.getElementById('captureBtn');
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+
+    captureBtn.addEventListener('click', async () => {
+        try {
+            // 화면 공유 요청
+            const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+            video.srcObject = stream;
+            
+            // 스트림이 준비될 때까지 잠시 대기
+            await new Promise(r => setTimeout(r, 500));
+            
+            // 캔버스에 그리기
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            
+            // Base64 데이터 추출
+            const imageData = canvas.toDataURL('image/png');
+            
+            // Streamlit으로 데이터 전송
+            window.parent.postMessage({
+                type: 'streamlit:setComponentValue',
+                value: imageData
+            }, '*');
+
+            // 스트림 종료
+            stream.getTracks().forEach(track => track.stop());
+        } catch (err) {
+            console.error("Error: " + err);
+        }
+    });
+    </script>
+    """
+    return components.html(js_code, height=60)
+
+# --- 기존 로직 함수들 ---
 def align_images_orb(img1, img2):
-    """ORB 특징점 매칭을 이용한 자동 이미지 정렬"""
     gray1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
     gray2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
-    
-    orb = cv2.ORB_create(3000)
+    orb = cv2.ORB_create(2000)
     kp1, des1 = orb.detectAndCompute(gray1, None)
     kp2, des2 = orb.detectAndCompute(gray2, None)
-    
-    if des1 is None or des2 is None: return img2
-    
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = bf.match(des1, des2)
-    matches = sorted(matches, key=lambda x: x.distance)
-    
+    matches = sorted(bf.match(des1, des2), key=lambda x: x.distance)
     good_matches = matches[:int(len(matches) * 0.1)]
-    if len(good_matches) < 4: return img2
-    
     src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
     dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-    
     M, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
-    if M is None: return img2
-    
-    aligned_img = cv2.warpPerspective(img2, M, (img1.shape[1], img1.shape[0]), 
-                                     borderMode=cv2.BORDER_CONSTANT, borderValue=(255,255,255))
-    return aligned_img
+    return cv2.warpPerspective(img2, M, (img1.shape[1], img1.shape[0]), borderValue=(255,255,255))
 
-def process_analysis(image):
-    """이미지 분할, 정렬, 차이점 및 텍스트 추출 통합 처리"""
-    # 1. 이미지 분할
-    h, w, _ = image.shape
+def process_analysis(image_rgb):
+    """이미지를 분석하여 결과 반환"""
+    h, w, _ = image_rgb.shape
     mid = w // 2
-    img_left = image[:, :mid]
-    img_right = image[:, mid:]
+    img_left = image_rgb[:, :mid]
+    img_right = image_rgb[:, mid:]
 
-    # 2. 자동 정렬
-    aligned_right = align_images_orb(img_left, img_right)
+    # 정렬
+    try:
+        aligned_right = align_images_orb(img_left, img_right)
+    except:
+        aligned_right = img_right
 
-    # 3. 차이점 마스크 생성
+    # 차이점 마스크
     diff = cv2.absdiff(img_left, aligned_right)
     diff_gray = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY)
-    diff_blur = cv2.GaussianBlur(diff_gray, (5, 5), 0)
-    _, diff_mask = cv2.threshold(diff_blur, 30, 255, cv2.THRESH_BINARY)
+    _, diff_mask = cv2.threshold(cv2.GaussianBlur(diff_gray, (5, 5), 0), 30, 255, cv2.THRESH_BINARY)
 
-    # 4. 텍스트 추출용 영역 검출
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 10))
+    # 텍스트 추출
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 5))
     dilated = cv2.dilate(diff_mask, kernel, iterations=2)
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
@@ -69,57 +111,66 @@ def process_analysis(image):
         if w > 20 and h > 10:
             roi = aligned_right[max(0, y-5):y+h+5, max(0, x-5):x+w+5]
             if roi.size == 0: continue
-            # OCR (한국어+영어)
-            text = pytesseract.image_to_string(roi, lang='kor+eng', config='--psm 7').strip()
+            text = pytesseract.image_to_string(cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY), lang='kor+eng', config='--psm 7').strip()
             if text:
                 texts.append(text)
                 cv2.rectangle(boxed_img, (x, y), (x+w, y+h), (255, 0, 0), 2)
                 
-    return img_left, aligned_right, boxed_img, texts, diff_mask
+    return img_left, aligned_right, boxed_img, diff_mask, texts
 
-# --- UI 부분 ---
-st.title("📑 AI 스마트 문서 비교기")
-st.markdown("""
-**사용 방법:** 
-1. `Win + Shift + S` (윈도우) 또는 `Cmd + Shift + 4` (맥)로 비교할 문서(좌우 병합본)를 캡처합니다.
-2. 아래의 **파일 업로드 박스를 클릭**한 후, **`Ctrl + V`**를 눌러 이미지를 붙여넣으세요!
-""")
+# --- 메인 화면 구성 ---
+st.title("📑 AI 문서 비교 & 실시간 캡처 검수기")
+st.markdown("이미지를 업로드하거나, **화면을 직접 캡처**하여 문서의 변경 사항을 즉시 확인하세요.")
 
-# 별도 라이브러리 없이 기본 uploader 사용
-uploaded_file = st.file_uploader("이미지 파일을 선택하거나 클립보드에서 붙여넣기 하세요.", type=["png", "jpg", "jpeg"])
+# 입력 방식 선택 (사이드바)
+input_mode = st.sidebar.radio("입력 방식 선택", ["이미지 파일 업로드", "스크린 캡처 사용"])
 
-if uploaded_file:
-    # 이미지 로드 및 변환
-    image = Image.open(uploaded_file).convert("RGB")
-    img_array = np.array(image)
+input_image = None
+
+if input_mode == "이미지 파일 업로드":
+    uploaded_file = st.sidebar.file_uploader("좌우 병합 이미지 업로드", type=["png", "jpg", "jpeg"])
+    if uploaded_file:
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        input_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        input_image = cv2.cvtColor(input_image, cv2.COLOR_BGR2RGB)
+
+else:
+    st.sidebar.info("1. 아래 버튼 클릭\n2. 캡처할 창 선택\n3. '공유' 클릭")
+    captured_data = screen_capture_js() # JS 컴포넌트 실행
     
-    with st.spinner("이미지를 분석하고 있습니다..."):
-        left_img, aligned_right, boxed_img, texts, mask = process_analysis(img_array)
+    if captured_data:
+        # Base64 데이터를 넘파이 이미지로 변환
+        header, encoded = captured_data.split(",", 1)
+        data = base64.b64decode(encoded)
+        image = Image.open(BytesIO(data))
+        input_image = np.array(image.convert("RGB"))
 
-    # 결과 레이아웃
-    tab1, tab2 = st.tabs(["🔍 시각적 비교", "📝 변경된 문장 리스트"])
+# --- 분석 및 결과 출력 ---
+if input_image is not None:
+    left, right_aligned, boxed, mask, texts = process_analysis(input_image)
+
+    tab1, tab2 = st.tabs(["📊 시각적 분석", "📝 변경된 문장 추출"])
 
     with tab1:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("원본 (초안)")
-            st.image(left_img, use_container_width=True)
-        with col2:
-            st.subheader("수정본 (감지된 영역)")
-            st.image(boxed_img, use_container_width=True)
-            
-        st.subheader("🔴 변경 지점 하이라이트")
-        overlay = left_img.copy()
-        # 차이점 마스크가 있는 부분을 빨간색으로 강조
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("초안 (Original)")
+            st.image(left, use_container_width=True)
+        with c2:
+            st.subheader("수정안 (Detected)")
+            st.image(boxed, use_container_width=True)
+        
+        st.subheader("변동 영역 하이라이트")
+        overlay = left.copy()
         overlay[mask > 0] = [255, 0, 0]
-        st.image(overlay, use_container_width=True, caption="초안 위에 수정된 부분을 빨간색으로 표시했습니다.")
+        st.image(overlay, use_container_width=True, caption="빨간색 표시: 변경된 픽셀 위치")
 
     with tab2:
-        st.subheader("추출된 수정 내용")
+        st.subheader("🔍 추출된 텍스트 리스트")
         if texts:
             for i, t in enumerate(texts):
-                st.info(f"**[{i+1}]** {t}")
+                st.info(f"**구간 {i+1}:** {t}")
         else:
-            st.success("감지된 텍스트 변경 사항이 없습니다.")
+            st.success("변경 사항이 감지되지 않았습니다.")
 else:
-    st.info("💡 캡처 후 이 창에서 Ctrl+V를 누르면 즉시 분석이 시작됩니다.")
+    st.warning("👈 이미지를 업로드하거나 '화면 캡처 시작' 버튼을 눌러주세요.")
