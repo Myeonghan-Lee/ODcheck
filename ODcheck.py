@@ -1,169 +1,145 @@
 import streamlit as st
+import os
 import cv2
 import numpy as np
-import pytesseract
-import re
+import pandas as pd
+from PIL import Image
+import matplotlib.pyplot as plt
 
-# 클라우드 배포 시 주석 처리 필요
-# pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# --- 페이지 설정 ---
+st.set_page_config(page_title="ODcheck Pro - Advanced Toolkit", layout="wide")
 
-st.set_page_config(page_title="스마트 문서 오버레이 비교기", layout="wide")
+st.title("🔍 ODcheck Pro: Object Detection Quality Control")
+st.markdown("""
+이 도구는 데이터셋의 품질을 시각적으로 점검하고 변경 사항을 추적하기 위해 설계되었습니다.
+""")
 
-def reset_app():
-    for key in st.session_state.keys():
-        del st.session_state[key]
-    st.rerun()
-
-def preprocess_for_ocr(img):
-    scale_factor = 2
-    img_resized = cv2.resize(img, None, fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.cvtColor(img_resized, cv2.COLOR_RGB2GRAY)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
-    return thresh, scale_factor
-
-def clean_text(text):
-    text = str(text).replace(" ", "")
-    clean = re.sub(r'[^가-힣a-zA-Z0-9]', '', text)
-    return clean
-
-def find_word_location(img, target_word):
-    processed_img, scale = preprocess_for_ocr(img)
-    custom_config = r'--oem 3 --psm 6'
-    d = pytesseract.image_to_data(processed_img, lang='kor+eng', config=custom_config, output_type=pytesseract.Output.DICT)
-    target_clean = clean_text(target_word)
-    
-    for i in range(len(d['text'])):
-        current_text = clean_text(d['text'][i])
-        if target_clean and target_clean in current_text:
-            original_x = int(d['left'][i] / scale)
-            original_y = int(d['top'][i] / scale)
-            return original_x, original_y
-    return None, None
-
-def extract_diff_texts(diff_img, aligned_right_img):
-    """차이점이 발생한 영역을 찾아 수정안(오른쪽)의 텍스트를 추출합니다."""
-    # 1. 차이점을 흑백화 및 이진화 (다른 부분은 하얗게)
-    gray_diff = cv2.cvtColor(diff_img, cv2.COLOR_BGR2GRAY)
-    _, thresh_diff = cv2.threshold(gray_diff, 30, 255, cv2.THRESH_BINARY)
-    
-    # 2. 픽셀들을 문장 형태로 묶기 (가로로 길게 팽창)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 10))
-    dilated = cv2.dilate(thresh_diff, kernel, iterations=2)
-    
-    # 3. 묶인 영역의 윤곽선(Contour) 찾기
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # 위에서 아래로 읽도록 Y좌표 기준으로 정렬
-    bounding_boxes = [cv2.boundingRect(c) for c in contours]
-    bounding_boxes = sorted(bounding_boxes, key=lambda b: b[1])
-    
-    extracted_texts = []
-    # 수정안 이미지에 박스를 그릴 복사본
-    boxed_img = aligned_right_img.copy()
-    
-    for (x, y, w, h) in bounding_boxes:
-        # 노이즈(작은 점 등) 무시: 너비 20px, 높이 10px 이상만 취급
-        if w > 20 and h > 10:
-            # 인식률을 높이기 위해 상하좌우 여백(Padding)을 5px씩 주고 자름
-            pad = 5
-            y1, y2 = max(0, y - pad), min(aligned_right_img.shape[0], y + h + pad)
-            x1, x2 = max(0, x - pad), min(aligned_right_img.shape[1], x + w + pad)
-            
-            crop = aligned_right_img[y1:y2, x1:x2]
-            
-            # 잘라낸 이미지에 OCR 전처리 적용
-            crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            crop_resized = cv2.resize(crop_gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-            _, crop_thresh = cv2.threshold(crop_resized, 150, 255, cv2.THRESH_BINARY)
-            
-            # psm 7: 해당 이미지를 '한 줄'의 텍스트로 강제 인식
-            text = pytesseract.image_to_string(crop_thresh, lang='kor+eng', config='--psm 7').strip()
-            
-            # 의미 있는 문자가 포함된 경우만 결과에 추가
-            if len(clean_text(text)) > 0:
-                extracted_texts.append(text)
-                # 수정안 이미지에 노란색 박스 그리기
-                cv2.rectangle(boxed_img, (x, y), (x+w, y+h), (255, 215, 0), 2)
-                
-    return extracted_texts, boxed_img
-
-st.title("🎯 스마트 문서 이미지 겹쳐보기 (자동 정렬 + 문장 추출)")
-st.markdown("기준 단어로 이미지를 자동 정렬하고, 변경된 부분을 시각적으로 보여준 뒤 **수정된 문장을 직접 읽어냅니다.**")
-
+# --- 사이드바: 설정 및 경로 ---
 with st.sidebar:
-    st.header("설정 및 도구")
-    uploaded_file = st.file_uploader("좌우 병합된 문서 이미지 업로드", type=["jpg", "jpeg", "png"])
-    st.divider()
-    st.subheader("정렬(Alignment) 설정")
-    anchor_word = st.text_input("기준 단어 입력", value="제목")
-    st.divider()
-    st.subheader("오버레이 설정")
-    blend_mode = st.radio("비교 모드 선택", ["차이점 강조 (Difference)", "투명도 겹쳐보기 (Alpha Blend)"])
-    alpha = st.slider("초안 투명도 조절", 0.0, 1.0, 0.5, 0.05, disabled=(blend_mode != "투명도 겹쳐보기 (Alpha Blend)"))
-    st.divider()
-    if st.button("🔄 앱 초기화", on_click=reset_app):
-        pass
-
-if uploaded_file:
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    image = cv2.imdecode(file_bytes, 1)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    st.header("📂 데이터 경로 설정")
+    img_dir = st.text_input("이미지 폴더 경로", value="./data/images")
+    label_dir = st.text_input("라벨(.txt) 폴더 경로", value="./data/labels")
     
-    h, w, _ = image.shape
-    mid = w // 2
-    left_img = image[:, :mid]
-    right_img = image[:, mid:]
+    st.header("⚙️ 시각화 설정")
+    box_thickness = st.slider("박스 두께", 1, 10, 2)
+    show_label_text = st.checkbox("클래스 이름 표시", value=True)
     
-    min_w = min(left_img.shape[1], right_img.shape[1])
-    left_img = left_img[:, :min_w]
-    right_img = right_img[:, :min_w]
+    st.header("🎯 필터링")
+    filter_option = st.selectbox("이미지 필터", ["전체 보기", "라벨 있음", "라벨 없음(Empty)"])
 
-    st.subheader("🔍 분석 결과")
-    
-    with st.spinner(f"이미지 정렬 및 변경된 문장 추출 중..."):
-        lx, ly = find_word_location(left_img, anchor_word)
-        rx, ry = find_word_location(right_img, anchor_word)
-        
-        aligned_right_img = right_img.copy()
-        
-        if lx is not None and rx is not None:
-            dx, dy = lx - rx, ly - ry
-            M = np.float32([[1, 0, dx], [0, 1, dy]])
-            rows, cols = right_img.shape[:2]
-            aligned_right_img = cv2.warpAffine(right_img, M, (cols, rows), borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
-            st.success("✅ 문서 자동 정렬 완료")
-        else:
-            st.warning("⚠️ 기준 단어를 찾지 못해 원본 위치에서 비교합니다.")
+# --- 데이터 로드 함수 ---
+def get_file_list(path, ext=(".jpg", ".png", ".jpeg")):
+    if not os.path.exists(path):
+        return []
+    return sorted([f for f in os.listdir(path) if f.lower().endswith(ext)])
 
-        # 오버레이 처리 및 텍스트 추출을 위한 차이값 계산
-        diff = cv2.absdiff(left_img, aligned_right_img)
-        
-        # 새로운 기능: 차이점 부분에서 텍스트 추출
-        extracted_texts, boxed_img = extract_diff_texts(diff, aligned_right_img)
+def read_yolo(label_path, img_w, img_h):
+    bboxes = []
+    if os.path.exists(label_path):
+        with open(label_path, 'r') as f:
+            for line in f.readlines():
+                parts = list(map(float, line.strip().split()))
+                if len(parts) == 5:
+                    cls, x, y, w, h = parts
+                    # 복원: 중심좌표 -> 좌상단/우하단
+                    x1 = int((x - w/2) * img_w)
+                    y1 = int((y - h/2) * img_h)
+                    x2 = int((x + w/2) * img_w)
+                    y2 = int((y + h/2) * img_h)
+                    bboxes.append({'cls': int(cls), 'bbox': (x1, y1, x2, y2)})
+    return bboxes
 
-        # 화면 출력 분할 (좌측: 오버레이, 우측: 추출된 텍스트)
-        col_img, col_text = st.columns([1.5, 1])
-        
-        with col_img:
-            if blend_mode == "차이점 강조 (Difference)":
-                blended_result = cv2.bitwise_not(diff)
-                st.image(blended_result, use_container_width=True, caption="[시각적 차이점] 어둡게 표시된 부분이 변경된 영역입니다.")
-            elif blend_mode == "투명도 겹쳐보기 (Alpha Blend)":
-                blended_result = cv2.addWeighted(left_img, alpha, aligned_right_img, 1 - alpha, 0)
-                st.image(blended_result, use_container_width=True, caption=f"[겹쳐보기] 초안 투명도: {alpha*100:.0f}%")
-                
-            st.image(boxed_img, use_container_width=True, caption="[영역 감지] 수정안 이미지에서 텍스트를 추출한 노란색 박스 영역입니다.")
+def draw_boxes(image, bboxes, thickness, show_text):
+    img_draw = image.copy()
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)]
+    for obj in bboxes:
+        c = colors[obj['cls'] % len(colors)]
+        x1, y1, x2, y2 = obj['bbox']
+        cv2.rectangle(img_draw, (x1, y1), (x2, y2), c, thickness)
+        if show_text:
+            cv2.putText(img_draw, f"ID: {obj['cls']}", (x1, y1-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, c, 2)
+    return img_draw
 
-        with col_text:
-            st.markdown("### 📝 추출된 수정 문장")
-            st.markdown("시각적으로 변화가 감지된 영역을 읽어낸 결과입니다.")
-            
-            if extracted_texts:
-                for idx, text in enumerate(extracted_texts):
-                    # 보기 편하도록 마크다운 인용구 스타일로 출력
-                    st.info(f"**{idx + 1}번째 변경 영역:**\n> {text}")
-            else:
-                st.success("변경된 텍스트가 감지되지 않았습니다.")
+# --- 메인 로직 ---
+img_files = get_file_list(img_dir)
 
+if not img_files:
+    st.warning("이미지 폴더를 확인해주세요. 파일을 찾을 수 없습니다.")
 else:
-    st.info("👈 왼쪽 사이드바에서 비교할 이미지 파일을 업로드해 주세요.")
+    # 세션 상태로 현재 인덱스 관리
+    if 'idx' not in st.session_state:
+        st.session_state.idx = 0
+
+    # 네비게이션 버튼
+    col1, col2, col3, col4 = st.columns([1, 1, 4, 2])
+    with col1:
+        if st.button("⬅️ 이전"):
+            st.session_state.idx = max(0, st.session_state.idx - 1)
+    with col2:
+        if st.button("다음 ➡️"):
+            st.session_state.idx = min(len(img_files) - 1, st.session_state.idx + 1)
+    with col4:
+        st.write(f"**진행도:** {st.session_state.idx + 1} / {len(img_files)}")
+
+    # 현재 파일 처리
+    target_img_name = img_files[st.session_state.idx]
+    target_img_path = os.path.join(img_dir, target_img_name)
+    target_label_path = os.path.join(label_dir, target_img_name.rsplit('.', 1)[0] + ".txt")
+
+    # 이미지 로드
+    img = cv2.imread(target_img_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    h, w, _ = img.shape
+
+    # 라벨 로드
+    bboxes = read_yolo(target_label_path, w, h)
+
+    # UI 레이아웃: 이미지 표시 및 정보
+    tab1, tab2 = st.tabs(["🖼️ 시각적 검수", "📊 데이터셋 통계"])
+
+    with tab1:
+        c1, c2 = st.columns(2)
+        
+        # 원본 이미지 (수정 전 가정)
+        with c1:
+            st.subheader("원본 데이터 (Original)")
+            canvas_raw = draw_boxes(img, bboxes, box_thickness, show_label_text)
+            st.image(canvas_raw, use_column_width=True)
+            
+        # 비교 이미지 또는 정보 (추후 수정 기능 확장 가능)
+        with c2:
+            st.subheader("상세 정보 (Details)")
+            st.info(f"파일명: {target_img_name}")
+            st.write(f"해상도: {w}x{h}")
+            if bboxes:
+                df_bboxes = pd.DataFrame(bboxes)
+                st.write(f"검출된 객체 수: {len(bboxes)}")
+                st.dataframe(df_bboxes)
+            else:
+                st.warning("이 이미지는 라벨 정보가 없습니다.")
+
+    with tab2:
+        st.subheader("전체 클래스 분포")
+        # 간단한 통계 계산 (샘플링)
+        all_labels = []
+        for f in os.listdir(label_dir)[:100]: # 성능상 100개만 우선 분석
+            if f.endswith(".txt"):
+                with open(os.path.join(label_dir, f), 'r') as lf:
+                    for line in lf:
+                        all_labels.append(int(line.split()[0]))
+        
+        if all_labels:
+            df_counts = pd.Series(all_labels).value_counts().sort_index()
+            st.bar_chart(df_counts)
+        else:
+            st.write("통계 데이터를 불러올 수 없습니다.")
+
+# --- 변경 사항 추적용 메모 섹션 ---
+st.divider()
+st.subheader("📝 검수 메모 및 변경 로그")
+log_text = st.text_area("현재 이미지에 대한 특이사항을 기록하세요.", "")
+if st.button("로그 저장"):
+    with open("audit_log.txt", "a") as f:
+        f.write(f"[{target_img_name}] {log_text}\n")
+    st.success("로그가 기록되었습니다.")
