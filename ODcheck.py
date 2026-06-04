@@ -4,87 +4,95 @@ import streamlit as st
 from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 
-def process_comparison(full_img, min_area, threshold_val):
-    """이미지를 분석하여 차이점을 찾아내는 함수"""
-    # 1. 이미지 분할
-    h, w, _ = full_img.shape
-    half_w = w // 2
+# 페이지 설정
+st.set_page_config(layout="wide", page_title="AI 이미지 검토 도구")
+
+def analyze_differences(img_left, img_right, sensitivity):
+    # 1. 그레이스케일 변환 및 노이즈 제거 (가우시안 블러)
+    # 이미지 정렬 미세 오차로 인한 가짜 탐지를 줄이기 위함
+    gray_left = cv2.cvtColor(img_left, cv2.COLOR_RGB2GRAY)
+    gray_right = cv2.cvtColor(img_right, cv2.COLOR_RGB2GRAY)
     
-    img_left = full_img[:, :half_w]
-    img_right = full_img[:, half_w:half_w*2]
+    gray_left = cv2.GaussianBlur(gray_left, (5, 5), 0)
+    gray_right = cv2.GaussianBlur(gray_right, (5, 5), 0)
 
-    # 크기 불일치 시 조정
-    if img_left.shape != img_right.shape:
-        img_right = cv2.resize(img_right, (img_left.shape[1], img_left.shape[0]))
-
-    # 2. 그레이스케일 변환
-    gray_left = cv2.cvtColor(img_left, cv2.COLOR_BGR2GRAY)
-    gray_right = cv2.cvtColor(img_right, cv2.COLOR_BGR2GRAY)
-
-    # 3. SSIM을 이용한 정밀 비교
+    # 2. SSIM (구조적 유사성) 계산
+    # score가 낮을수록 차이가 큰 지점
     (score, diff) = ssim(gray_left, gray_right, full=True)
     diff = (diff * 255).astype("uint8")
 
-    # 4. 임계값 및 노이즈 처리 (사용자 설정 가능하도록 개선)
-    thresh = cv2.threshold(diff, threshold_val, 255, cv2.THRESH_BINARY_INV)[1]
-    kernel = np.ones((3, 3), np.uint8)
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel) # 노이즈 제거
-
-    # 5. 차이점 영역 탐지
+    # 3. 차이점 강조를 위한 임계값 처리
+    # sensitivity 값이 낮을수록 더 예민하게 잡아냄
+    thresh = cv2.threshold(diff, sensitivity, 255, cv2.THRESH_BINARY_INV)[1]
+    
+    # 4. 형태학적 변환 (미세한 점들을 뭉쳐서 하나의 영역으로 인식)
+    kernel = np.ones((5, 5), np.uint8)
+    thresh = cv2.dilate(thresh, kernel, iterations=2)
+    
+    # 5. 윤곽선 추출
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    result_img = img_right.copy()
-    change_count = 0
-    for c in contours:
+    
+    output_img = img_right.copy()
+    diff_boxes = []
+    
+    for i, c in enumerate(contours):
         area = cv2.contourArea(c)
-        if area > min_area: # 설정한 면적 이상의 변화만 감지
-            x, y, w_box, h_box = cv2.boundingRect(c)
-            cv2.rectangle(result_img, (x, y), (x + w_box, y + h_box), (0, 0, 255), 3)
-            change_count += 1
+        if area > 40:  # 너무 작은 노이즈는 무시
+            x, y, w, h = cv2.boundingRect(c)
+            # 수정본 이미지에 빨간 사각형 표시
+            cv2.rectangle(output_img, (x, y), (x + w, y + h), (255, 0, 0), 3)
+            # 번호 표시 (안내 미흡 해결)
+            cv2.putText(output_img, str(i+1), (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+            diff_boxes.append(f"수정사항 {i+1}: 좌표 ({x}, {y}) 주변 영역")
 
-    # 6. 히트맵 생성
-    diff_color = cv2.applyColorMap(thresh, cv2.COLORMAP_JET)
+    return output_img, score, diff_boxes, thresh
 
-    return img_left, result_img, diff_color, score, change_count
-
-# --- Streamlit UI 시작 ---
-st.set_page_config(layout="wide", page_title="ODcheck - 이미지 비교 도구")
-st.title("🔍 ODcheck: 수정 사항 자동 점검 도구")
-st.write("이미지를 업로드하면 왼쪽(원본)과 오른쪽(수정본)을 비교하여 변경된 부분을 자동으로 찾아냅니다.")
+# --- UI 부분 ---
+st.title("🔍 자동 이미지 수정 사항 점검기")
+st.markdown("""
+이 도구는 **왼쪽(원본) | 오른쪽(수정본)**으로 구성된 이미지를 분석하여 변경된 부분을 자동으로 찾아냅니다.
+""")
 
 # 사이드바 설정
-st.sidebar.header("설정 (민감도 조절)")
-min_area = st.sidebar.slider("감지할 최소 면적 (작을수록 예민)", 0, 500, 50)
-threshold_val = st.sidebar.slider("임계값 (낮을수록 미세한 차이 감지)", 0, 200, 0)
+st.sidebar.header("⚙️ 분석 설정")
+sensitivity = st.sidebar.slider("탐지 민감도 (낮을수록 미세한 차이 탐지)", 0, 200, 150)
+st.sidebar.info("정확하게 찾지 못한다면 민감도를 조절해 보세요.")
 
-uploaded_file = st.file_uploader("검토할 이미지 파일을 선택하세요 (좌우 분할 이미지)", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("이미지 업로드 (PNG, JPG)", type=["jpg", "jpeg", "png"])
 
-if uploaded_file is not None:
-    # 이미지 로드
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    image = cv2.imdecode(file_bytes, 1)
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB) # OpenCV BGR -> RGB 변환
+if uploaded_file:
+    # 이미지 처리
+    image = Image.open(uploaded_file).convert("RGB")
+    img_array = np.array(image)
+    
+    h, w, _ = img_array.shape
+    half_w = w // 2
+    
+    left_part = img_array[:, :half_w]   # 원본
+    right_part = img_array[:, half_w:]  # 수정본 (또는 결과물)
 
     # 분석 실행
-    with st.spinner('분석 중...'):
-        left_part, right_part, diff_map, score, count = process_comparison(image, min_area, threshold_val)
+    result_img, similarity, log, mask = analyze_differences(left_part, right_part, sensitivity)
 
-    # 결과 요약
-    st.success(f"분석 완료! 유사도: {score:.2%} | 감지된 수정 부분: {count}곳")
-
-    # 결과 화면 출력
-    col1, col2, col3 = st.columns(3)
+    # 결과 요약 레이아웃
+    col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.subheader("1. 원본 (왼쪽)")
-        st.image(left_part, use_container_width=True)
-
+        st.subheader("✅ 수정 사항 시각화")
+        st.image(result_img, caption=f"분석 결과 (유사도: {similarity:.2%})", use_container_width=True)
+        
     with col2:
-        st.subheader("2. 수정 사항 확인")
-        st.image(right_part, use_container_width=True)
+        st.subheader("📝 점검 리스트")
+        if log:
+            st.write(f"총 **{len(log)}군데**의 수정 사항이 발견되었습니다.")
+            for item in log:
+                st.write(f"- {item}")
+        else:
+            st.success("원본과 완벽히 일치하거나 수정 사항이 없습니다!")
 
-    with col3:
-        st.subheader("3. 차이점 히트맵")
-        st.image(diff_map, use_container_width=True)
+    # 상세 분석 (히트맵)
+    with st.expander("차이점 추출 마스크(Mask) 보기"):
+        st.image(mask, caption="차이점이 집중된 구역 (흰색 부분)", use_container_width=True)
+
 else:
-    st.info("파일을 업로드하면 분석이 시작됩니다.")
+    st.warning("분석할 이미지를 업로드해 주세요.")
