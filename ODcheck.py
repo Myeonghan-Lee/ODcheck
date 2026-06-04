@@ -8,7 +8,7 @@ from PIL import Image
 # Tesseract 경로 설정 (필요시)
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-st.set_page_config(page_title="AI 문서 비교 검수기", layout="wide")
+st.set_page_config(page_title="스마트 문서 변동사항 탐지기", layout="wide")
 
 def align_images_orb(img1, img2):
     """ORB 특징점 매칭을 이용한 자동 이미지 정렬"""
