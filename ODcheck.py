@@ -7,139 +7,136 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 # --- 페이지 설정 ---
-st.set_page_config(page_title="ODcheck Pro - Advanced Toolkit", layout="wide")
+st.set_page_config(page_title="Advanced ODcheck Tool", layout="wide")
 
-st.title("🔍 ODcheck Pro: Object Detection Quality Control")
+st.title("🔍 Advanced Object Detection Checker")
 st.markdown("""
-이 도구는 데이터셋의 품질을 시각적으로 점검하고 변경 사항을 추적하기 위해 설계되었습니다.
+이 도구는 데이터셋의 라벨 상태를 점검하고 비교하기 위해 설계되었습니다. 
+좌측 사이드바에서 경로를 설정하고 필터를 적용하세요.
 """)
 
-# --- 사이드바: 설정 및 경로 ---
+# --- 사이드바: 설정 및 제어 ---
 with st.sidebar:
     st.header("📂 데이터 경로 설정")
     img_dir = st.text_input("이미지 폴더 경로", value="./data/images")
-    label_dir = st.text_input("라벨(.txt) 폴더 경로", value="./data/labels")
+    label_dir_a = st.text_input("라벨 폴더 A (GT/기존)", value="./data/labels_v1")
+    label_dir_b = st.text_input("라벨 폴더 B (Pred/수정후 - 선택사항)", value="")
     
-    st.header("⚙️ 시각화 설정")
-    box_thickness = st.slider("박스 두께", 1, 10, 2)
-    show_label_text = st.checkbox("클래스 이름 표시", value=True)
+    st.header("🎨 시각화 설정")
+    line_thickness = st.slider("선 두께", 1, 10, 2)
+    bbox_opacity = st.slider("박스 투명도", 0.0, 1.0, 0.5)
     
-    st.header("🎯 필터링")
-    filter_option = st.selectbox("이미지 필터", ["전체 보기", "라벨 있음", "라벨 없음(Empty)"])
+    st.header("🏷️ 클래스 정의")
+    class_names_input = st.text_area("클래스 목록 (쉼표 구분)", "Person, Car, Bicycle, Dog")
+    class_names = [c.strip() for c in class_names_input.split(",")]
+    
+    target_classes = st.multiselect("확인할 클래스 필터", class_names, default=class_names)
 
-# --- 데이터 로드 함수 ---
-def get_file_list(path, ext=(".jpg", ".png", ".jpeg")):
-    if not os.path.exists(path):
+# --- 유틸리티 함수 ---
+def load_yolo_labels(label_path, img_w, img_h):
+    if not os.path.exists(label_path):
         return []
-    return sorted([f for f in os.listdir(path) if f.lower().endswith(ext)])
+    labels = []
+    with open(label_path, 'r') as f:
+        for line in f.readlines():
+            parts = line.split()
+            cls_id = int(parts[0])
+            # YOLO: class, x_center, y_center, width, height (normalized)
+            x_c, y_c, w, h = map(float, parts[1:])
+            
+            # Convert to pixel coordinates
+            x1 = int((x_c - w/2) * img_w)
+            y1 = int((y_c - h/2) * img_h)
+            x2 = int((x_c + w/2) * img_w)
+            y2 = int((y_c + h/2) * img_h)
+            labels.append({'id': cls_id, 'bbox': [x1, y1, x2, y2]})
+    return labels
 
-def read_yolo(label_path, img_w, img_h):
-    bboxes = []
-    if os.path.exists(label_path):
-        with open(label_path, 'r') as f:
-            for line in f.readlines():
-                parts = list(map(float, line.strip().split()))
-                if len(parts) == 5:
-                    cls, x, y, w, h = parts
-                    # 복원: 중심좌표 -> 좌상단/우하단
-                    x1 = int((x - w/2) * img_w)
-                    y1 = int((y - h/2) * img_h)
-                    x2 = int((x + w/2) * img_w)
-                    y2 = int((y + h/2) * img_h)
-                    bboxes.append({'cls': int(cls), 'bbox': (x1, y1, x2, y2)})
-    return bboxes
-
-def draw_boxes(image, bboxes, thickness, show_text):
-    img_draw = image.copy()
-    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)]
-    for obj in bboxes:
-        c = colors[obj['cls'] % len(colors)]
-        x1, y1, x2, y2 = obj['bbox']
-        cv2.rectangle(img_draw, (x1, y1), (x2, y2), c, thickness)
-        if show_text:
-            cv2.putText(img_draw, f"ID: {obj['cls']}", (x1, y1-10), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, c, 2)
-    return img_draw
+def draw_boxes(image, labels, class_names, target_classes, thickness, opacity):
+    overlay = image.copy()
+    # 클래스별 색상 생성
+    colors = plt.cm.get_cmap('tab10', len(class_names))
+    
+    for label in labels:
+        cls_id = label['id']
+        if cls_id >= len(class_names) or class_names[cls_id] not in target_classes:
+            continue
+            
+        color = [int(c * 255) for c in colors(cls_id)[:3]]
+        x1, y1, x2, y2 = label['bbox']
+        
+        # 박스 그리기
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, thickness)
+        # 라벨 텍스트
+        label_text = class_names[cls_id]
+        cv2.putText(overlay, label_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+    
+    return cv2.addWeighted(overlay, opacity, image, 1 - opacity, 0)
 
 # --- 메인 로직 ---
-img_files = get_file_list(img_dir)
+if os.path.exists(img_dir):
+    image_files = [f for f in os.listdir(img_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    image_files.sort()
 
-if not img_files:
-    st.warning("이미지 폴더를 확인해주세요. 파일을 찾을 수 없습니다.")
-else:
-    # 세션 상태로 현재 인덱스 관리
-    if 'idx' not in st.session_state:
-        st.session_state.idx = 0
-
-    # 네비게이션 버튼
-    col1, col2, col3, col4 = st.columns([1, 1, 4, 2])
-    with col1:
-        if st.button("⬅️ 이전"):
-            st.session_state.idx = max(0, st.session_state.idx - 1)
-    with col2:
-        if st.button("다음 ➡️"):
-            st.session_state.idx = min(len(img_files) - 1, st.session_state.idx + 1)
-    with col4:
-        st.write(f"**진행도:** {st.session_state.idx + 1} / {len(img_files)}")
-
-    # 현재 파일 처리
-    target_img_name = img_files[st.session_state.idx]
-    target_img_path = os.path.join(img_dir, target_img_name)
-    target_label_path = os.path.join(label_dir, target_img_name.rsplit('.', 1)[0] + ".txt")
-
-    # 이미지 로드
-    img = cv2.imread(target_img_path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    h, w, _ = img.shape
-
-    # 라벨 로드
-    bboxes = read_yolo(target_label_path, w, h)
-
-    # UI 레이아웃: 이미지 표시 및 정보
-    tab1, tab2 = st.tabs(["🖼️ 시각적 검수", "📊 데이터셋 통계"])
-
-    with tab1:
-        c1, c2 = st.columns(2)
+    if not image_files:
+        st.error("이미지 파일이 없습니다.")
+    else:
+        # 파일 선택 슬라이더 및 네비게이션
+        col_nav1, col_nav2, col_nav3 = st.columns([1, 4, 1])
+        with col_nav2:
+            idx = st.select_slider("이미지 선택", options=range(len(image_files)), format_func=lambda i: image_files[i])
         
-        # 원본 이미지 (수정 전 가정)
-        with c1:
-            st.subheader("원본 데이터 (Original)")
-            canvas_raw = draw_boxes(img, bboxes, box_thickness, show_label_text)
-            st.image(canvas_raw, use_column_width=True)
+        current_img_name = image_files[idx]
+        img_path = os.path.join(img_dir, current_img_name)
+        
+        # 이미지 로드
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w, _ = img.shape
+        
+        # 라벨 로드
+        label_name = os.path.splitext(current_img_name)[0] + ".txt"
+        labels_a = load_yolo_labels(os.path.join(label_dir_a, label_name), w, h)
+        
+        # 화면 분할 레이아웃
+        if label_dir_b:
+            col1, col2 = st.columns(2)
+            labels_b = load_yolo_labels(os.path.join(label_dir_b, label_name), w, h)
             
-        # 비교 이미지 또는 정보 (추후 수정 기능 확장 가능)
-        with c2:
-            st.subheader("상세 정보 (Details)")
-            st.info(f"파일명: {target_img_name}")
-            st.write(f"해상도: {w}x{h}")
-            if bboxes:
-                df_bboxes = pd.DataFrame(bboxes)
-                st.write(f"검출된 객체 수: {len(bboxes)}")
-                st.dataframe(df_bboxes)
-            else:
-                st.warning("이 이미지는 라벨 정보가 없습니다.")
-
-    with tab2:
-        st.subheader("전체 클래스 분포")
-        # 간단한 통계 계산 (샘플링)
-        all_labels = []
-        for f in os.listdir(label_dir)[:100]: # 성능상 100개만 우선 분석
-            if f.endswith(".txt"):
-                with open(os.path.join(label_dir, f), 'r') as lf:
-                    for line in lf:
-                        all_labels.append(int(line.split()[0]))
-        
-        if all_labels:
-            df_counts = pd.Series(all_labels).value_counts().sort_index()
-            st.bar_chart(df_counts)
+            with col1:
+                st.subheader("버전 A (기존/GT)")
+                res_a = draw_boxes(img.copy(), labels_a, class_names, target_classes, line_thickness, bbox_opacity)
+                st.image(res_a, use_column_width=True)
+                st.write(f"객체 수: {len(labels_a)}")
+                
+            with col2:
+                st.subheader("버전 B (비교군/Pred)")
+                res_b = draw_boxes(img.copy(), labels_b, class_names, target_classes, line_thickness, bbox_opacity)
+                st.image(res_b, use_column_width=True)
+                st.write(f"객체 수: {len(labels_b)}")
         else:
-            st.write("통계 데이터를 불러올 수 없습니다.")
+            st.subheader(f"현재 이미지: {current_img_name}")
+            res_a = draw_boxes(img.copy(), labels_a, class_names, target_classes, line_thickness, bbox_opacity)
+            st.image(res_a, use_column_width=True)
+            st.write(f"검출된 객체 수: {len(labels_a)}")
 
-# --- 변경 사항 추적용 메모 섹션 ---
-st.divider()
-st.subheader("📝 검수 메모 및 변경 로그")
-log_text = st.text_area("현재 이미지에 대한 특이사항을 기록하세요.", "")
-if st.button("로그 저장"):
-    with open("audit_log.txt", "a") as f:
-        f.write(f"[{target_img_name}] {log_text}\n")
-    st.success("로그가 기록되었습니다.")
+        # --- 통계 섹션 ---
+        st.divider()
+        st.subheader("📊 데이터셋 요약")
+        # 간단한 통계 예시 (현재 이미지만)
+        if labels_a:
+            df_stats = pd.DataFrame([class_names[l['id']] for l in labels_a], columns=['Class'])
+            st.bar_chart(df_stats['Class'].value_counts())
+        else:
+            st.info("현재 이미지에 라벨이 없습니다.")
+
+else:
+    st.warning("경로를 올바르게 입력해주세요.")
+
+# --- 추가 기능 제안 ---
+with st.expander("🛠️ 사용 팁"):
+    st.write("""
+    1. **비교 분석:** '라벨 폴더 B'를 입력하면 두 폴더의 라벨을 좌우로 비교할 수 있습니다.
+    2. **오답 확인:** 특정 클래스만 필터링하여 오검출(FP)이나 미검출(FN)을 빠르게 찾으세요.
+    3. **빠른 이동:** 키보드 화살표 키나 상단 슬라이더를 사용하여 이미지를 넘길 수 있습니다.
+    """)
