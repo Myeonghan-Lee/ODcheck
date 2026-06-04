@@ -2,110 +2,130 @@ import streamlit as st
 import cv2
 import numpy as np
 import pytesseract
+import re
 from PIL import Image
-import io
 
-# Tesseract-OCR 경로 (윈도우 로컬 실행 시 필요하면 설정)
+# Tesseract 경로 설정 (필요시)
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 st.set_page_config(page_title="AI 문서 비교 검수기", layout="wide")
 
 def align_images_orb(img1, img2):
-    """특징점 매칭을 이용한 이미지 자동 정렬"""
+    """ORB 특징점 매칭을 이용한 자동 이미지 정렬"""
     gray1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
     gray2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
-    orb = cv2.ORB_create(3000)
+
+    orb = cv2.ORB_create(2000)
     kp1, des1 = orb.detectAndCompute(gray1, None)
     kp2, des2 = orb.detectAndCompute(gray2, None)
+
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = sorted(bf.match(des1, des2), key=lambda x: x.distance)
-    good_matches = matches[:int(len(matches) * 0.15)]
-    if len(good_matches) < 4: return img2
+    matches = bf.match(des1, des2)
+    matches = sorted(matches, key=lambda x: x.distance)
+
+    # 상위 10% 매칭점만 사용
+    good_matches = matches[:int(len(matches) * 0.1)]
     src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
     dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-    M, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
-    return cv2.warpPerspective(img2, M, (img1.shape[1], img1.shape[0]), borderValue=(255,255,255))
 
-def process_analysis(image_rgb):
-    """이미지 분석 전체 프로세스"""
-    h, w, _ = image_rgb.shape
-    mid = w // 2
-    img_l = image_rgb[:, :mid]
-    img_r = image_rgb[:, mid:]
+    M, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+    aligned_img = cv2.warpPerspective(img2, M, (img1.shape[1], img1.shape[0]), borderMode=cv2.BORDER_CONSTANT, borderValue=(255,255,255))
+    
+    return aligned_img
 
-    # 1. 자동 정렬
-    aligned_r = align_images_orb(img_l, img_r)
-
-    # 2. 차이점 계산
-    diff = cv2.absdiff(img_l, aligned_r)
+def get_diff_mask(img1, img2, threshold=30):
+    """차이점 마스크 생성 (노이즈 제거 포함)"""
+    diff = cv2.absdiff(img1, img2)
     diff_gray = cv2.cvtColor(diff, cv2.COLOR_RGB2GRAY)
-    _, mask = cv2.threshold(cv2.GaussianBlur(diff_gray, (5, 5), 0), 30, 255, cv2.THRESH_BINARY)
+    # 미세한 차이는 무시하기 위해 블러 처리
+    diff_blur = cv2.GaussianBlur(diff_gray, (5, 5), 0)
+    _, diff_mask = cv2.threshold(diff_blur, threshold, 255, cv2.THRESH_BINARY)
+    return diff_mask
 
-    # 3. 텍스트 추출 및 박싱
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 10))
-    dilated = cv2.dilate(mask, kernel, iterations=2)
+def extract_text_from_diff(diff_mask, target_img):
+    """차이가 있는 영역에서만 텍스트 추출"""
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 5))
+    dilated = cv2.dilate(diff_mask, kernel, iterations=2)
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    results = []
+    boxed_img = target_img.copy()
+    
+    # Y 좌표 순으로 정렬 (위에서 아래로)
     contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[1])
 
-    texts = []
-    boxed_img = aligned_r.copy()
     for cnt in contours:
-        x, y, wb, hb = cv2.boundingRect(cnt)
-        if wb > 20 and hb > 10:
-            roi = aligned_r[max(0, y-5):y+hb+5, max(0, x-5):x+wb+5]
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w > 20 and h > 10:
+            roi = target_img[max(0, y-5):y+h+5, max(0, x-5):x+w+5]
             if roi.size == 0: continue
-            text = pytesseract.image_to_string(roi, lang='kor+eng', config='--psm 7').strip()
+            
+            # OCR 인식률 향상을 위한 전처리
+            roi_gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+            text = pytesseract.image_to_string(roi_gray, lang='kor+eng', config='--psm 7').strip()
+            
             if text:
-                texts.append(text)
-                cv2.rectangle(boxed_img, (x, y), (x+wb, y+hb), (255, 0, 0), 2)
+                results.append(text)
+                cv2.rectangle(boxed_img, (x, y), (x+w, y+h), (255, 0, 0), 2)
+                
+    return results, boxed_img
 
-    return img_l, aligned_r, boxed_img, mask, texts
+# --- UI Layout ---
+st.title("📑 스마트 문서 변동사항 탐지기")
+st.markdown("두 이미지의 픽셀 단위 차이를 분석하여 **수정된 문장만 골라냅니다.**")
 
-# --- 메인 화면 ---
-st.title("🎯 AI 스마트 문서 비교기")
-
-# 중요: Ctrl+V 사용법 안내
-st.markdown("""
-### 📋 이미지 입력 방법
-1. 비교할 문서(좌우 병합본)를 캡처합니다 (`Win+Shift+S` 또는 `Cmd+Shift+4`).
-2. **아래 'Browse files' 영역을 마우스로 한 번 클릭**합니다 (포커스 활성화).
-3. **`Ctrl + V`** (맥은 `Cmd + V`)를 눌러 이미지를 바로 붙여넣으세요.
-""")
-
-uploaded_file = st.file_uploader("여기를 클릭한 후 Ctrl+V를 누르거나 파일을 드래그하세요", type=["png", "jpg", "jpeg"])
+uploaded_file = st.sidebar.file_uploader("비교할 이미지 업로드 (좌우 병합본)", type=["png", "jpg", "jpeg"])
 
 if uploaded_file:
-    # 데이터 로드
+    # 이미지 로드
     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    full_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    full_img = cv2.cvtColor(full_img, cv2.COLOR_BGR2RGB)
 
-    with st.spinner("이미지 분석 중..."):
-        l_img, r_aligned, b_img, mask, results = process_analysis(image_rgb)
+    # 반으로 나누기
+    h, w, _ = full_img.shape
+    mid = w // 2
+    img_left = full_img[:, :mid]
+    img_right = full_img[:, mid:]
 
-    # 결과 대시보드
-    tab1, tab2 = st.tabs(["📊 결과 시각화", "📝 추출된 문장"])
+    # 처리 시작
+    with st.spinner("이미지 정렬 및 분석 중..."):
+        # 1. 자동 정렬
+        try:
+            aligned_right = align_images_orb(img_left, img_right)
+            st.sidebar.success("✅ 자동 정렬 성공")
+        except:
+            aligned_right = img_right
+            st.sidebar.warning("⚠️ 자동 정렬 실패 (기본 위치 사용)")
+
+        # 2. 차이점 추출
+        diff_mask = get_diff_mask(img_left, aligned_right)
+        texts, boxed_img = extract_text_from_diff(diff_mask, aligned_right)
+
+    # 결과 표시
+    tab1, tab2 = st.tabs(["📊 분석 결과 시각화", "📝 추출된 텍스트"])
 
     with tab1:
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("원본(초안)")
-            st.image(l_img, use_container_width=True)
+            st.subheader("초안 (왼쪽)")
+            st.image(img_left, use_container_width=True)
         with c2:
-            st.subheader("수정본(감지구역)")
-            st.image(b_img, use_container_width=True)
+            st.subheader("수정안 (오른쪽 - 감지 구역)")
+            st.image(boxed_img, use_container_width=True)
         
         st.subheader("변동 영역 하이라이트")
-        overlay = l_img.copy()
-        overlay[mask > 0] = [255, 0, 0]
-        st.image(overlay, use_container_width=True, caption="빨간색 부분이 수정된 위치입니다.")
+        # 차이점을 빨간색으로 강조
+        overlay = img_left.copy()
+        overlay[diff_mask > 0] = [255, 0, 0] # 차이점을 빨간색으로
+        st.image(overlay, use_container_width=True, caption="빨간색으로 표시된 부분이 변경된 위치입니다.")
 
     with tab2:
-        st.subheader("🔍 감지된 변경 문장 리스트")
-        if results:
-            for i, text in enumerate(results):
-                st.info(f"**구간 {i+1}:** {text}")
+        st.subheader("🔍 변경 내용 리스트")
+        if texts:
+            for i, t in enumerate(texts):
+                st.info(f"**변경 구간 {i+1}:** {t}")
         else:
-            st.success("변경된 텍스트가 없습니다.")
+            st.write("감지된 변경 사항이 없습니다.")
 else:
-    st.info("이미지를 기다리고 있습니다...")
+    st.info("사이드바에서 이미지를 업로드하세요.")
