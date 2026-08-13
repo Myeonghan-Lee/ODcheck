@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>📑 스마트 문서 변동사항 탐지기 (정밀 분석 버전)</title>
+    <title>📑 스마트 문서 변동사항 탐지기 (초고속 온디맨드 에디션)</title>
     <!-- Tailwind CSS (UI Styling) -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- FontAwesome Icons -->
@@ -19,14 +19,14 @@
 </head>
 <body class="bg-slate-50 text-slate-800 font-sans h-screen flex flex-col overflow-hidden">
 
-    <!-- 초기 라이브러리 엔진 컴파일 로더 -->
-    <div id="loader" class="fixed inset-0 bg-slate-950/80 flex flex-col items-center justify-center z-50 transition-all duration-300">
+    <!-- 온디맨드 분석 엔진 컴파일 로더 (기본적으로 숨겨짐, 이미지 업로드 시 가동) -->
+    <div id="loader" class="fixed inset-0 bg-slate-950/80 flex flex-col items-center justify-center z-50 transition-all duration-300 hidden opacity-0">
         <div class="bg-white p-6 rounded-2xl shadow-2xl flex flex-col items-center max-w-sm w-full mx-4 border border-slate-100">
             <div class="animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent mb-4"></div>
-            <h3 class="text-lg font-bold text-slate-800 mb-1" id="loaderTitle">정밀 정렬 엔진 초기화 중</h3>
-            <p class="text-sm text-slate-500 text-center mb-4" id="loaderDesc">OpenCV 특징점 매칭 및 기하학 분석 Wasm 컴파일러를 구동하고 있습니다. (최초 1회만 소요)</p>
+            <h3 class="text-lg font-bold text-slate-800 mb-1" id="loaderTitle">정밀 엔진 가동 중</h3>
+            <p class="text-sm text-slate-500 text-center mb-4" id="loaderDesc">기하학 정렬을 위한 OpenCV Wasm 컴파일러를 가동하고 있습니다.</p>
             <div class="w-full bg-slate-100 rounded-full h-2">
-                <div class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: 15%" id="loaderBar"></div>
+                <div class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: 0%" id="loaderBar"></div>
             </div>
         </div>
     </div>
@@ -39,7 +39,7 @@
                 <span class="text-3xl">📑</span>
                 <div>
                     <h1 class="text-base font-bold tracking-tight text-slate-900 leading-tight">스마트 문서 변동기</h1>
-                    <p class="text-xs text-blue-600 font-semibold">정밀 기하 정렬 알고리즘 탑재</p>
+                    <p class="text-xs text-blue-600 font-semibold">초고속 온디맨드 가속화 엔진</p>
                 </div>
             </div>
 
@@ -105,7 +105,6 @@
                 </div>
             </div>
 
-            <!-- 하단 정보 -->
             <div class="mt-auto pt-4 border-t border-slate-100 text-[10px] text-slate-400 text-center">
                 Wasm OpenCV.js & Tesseract.js
             </div>
@@ -198,41 +197,56 @@
     <img id="imgSrc" class="hidden" alt="source">
 
     <script>
-        let opencvReady = false;
+        let opencvLoaded = false;
 
-        // --- OpenCV.js 글로벌 초기화 리스너 인터페이스 ---
-        var Module = {
-            onRuntimeInitialized: function() {
-                console.log("OpenCV Wasm Core Ready");
-                opencvReady = true;
-                updateLoadingBar(100, "분석 가동 완료", "모든 파이썬 이미지 프로세싱 알고리즘이 로컬 브라우저에 배포되었습니다.");
-                setTimeout(() => {
-                    document.getElementById('loader').classList.add('opacity-0');
-                    setTimeout(() => document.getElementById('loader').classList.add('hidden'), 300);
-                }, 500);
-
-                if (imgSrc.src) {
-                    processDocument();
-                }
+        // --- 온디맨드 연산 가동을 위한 동적 엔진 인젝션 모듈 ---
+        function loadOpenCV(callback) {
+            if (window.cv && window.cv.Mat) {
+                opencvLoaded = true;
+                callback();
+                return;
             }
-        };
+
+            const loader = document.getElementById('loader');
+            loader.classList.remove('hidden');
+            loader.classList.remove('opacity-0');
+            updateLoadingBar(20, "연산 엔진 호출 중", "가로 정밀 기하 보정을 위한 OpenCV 핵심 모듈을 불러오고 있습니다.");
+
+            const script = document.createElement('script');
+            script.type = 'text/javascript';
+            script.async = true;
+            script.src = "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-alpha.0/dist/opencv.js";
+
+            window.Module = {
+                onRuntimeInitialized: function() {
+                    console.log("OpenCV Wasm Loaded On-Demand");
+                    opencvLoaded = true;
+                    updateLoadingBar(100, "준비 완료!", "정밀 정렬 및 컴퓨터 비전 판독 장치가 모두 활성화되었습니다.");
+                    setTimeout(() => {
+                        loader.classList.add('opacity-0');
+                        setTimeout(() => loader.classList.add('hidden'), 300);
+                        callback();
+                    }, 500);
+                }
+            };
+
+            script.onload = function() {
+                updateLoadingBar(60, "웹어셈블리 기기 컴파일", "브라우저 가상 머신에 랩 및 특징 매핑 가속을 주입하는 중입니다.");
+            };
+
+            script.onerror = function() {
+                updateLoadingBar(100, "엔진 연동 오류", "네트워크 환경 불안정으로 라이브러리를 가동하지 못했습니다. 새로고침 후 다시 시도해 주세요.");
+                setTimeout(() => loader.classList.add('hidden'), 3000);
+            };
+
+            document.body.appendChild(script);
+        }
 
         function updateLoadingBar(pct, title, desc) {
             document.getElementById('loaderBar').style.width = pct + '%';
             if (title) document.getElementById('loaderTitle').innerText = title;
             if (desc) document.getElementById('loaderDesc').innerText = desc;
         }
-
-        // 로더 프로그레스 시뮬레이션
-        let initProgress = 15;
-        let initTimer = setInterval(() => {
-            if (initProgress < 85 && !opencvReady) {
-                initProgress += Math.floor(Math.random() * 5) + 1;
-                updateLoadingBar(initProgress);
-            } else {
-                clearInterval(initTimer);
-            }
-        }, 200);
 
         // --- DOM Elements ---
         const fileInput = document.getElementById('fileInput');
@@ -316,10 +330,18 @@
             reader.readAsDataURL(file);
         }
 
+        // 이미지가 실제로 브라우저 캐시에 올라오면, 온디맨드로 OpenCV 로드 후 프로세싱 시작!
         imgSrc.onload = function() {
             emptyState.classList.add('hidden');
             resultsLayout.classList.remove('hidden');
-            processDocument();
+            
+            if (!opencvLoaded) {
+                loadOpenCV(() => {
+                    processDocument();
+                });
+            } else {
+                processDocument();
+            }
         };
 
         function resetState() {
@@ -362,7 +384,7 @@
 
         // --- [핵심 구현] 파이썬 OpenCV 알고리즘 1:1 정밀 포팅 ---
         function processDocument() {
-            if (!opencvReady || !imgSrc.src) return;
+            if (!opencvLoaded || !imgSrc.src) return;
 
             // 로딩 스피너 활성화
             document.getElementById('processingSpinner').classList.remove('hidden');
@@ -417,7 +439,7 @@
                     // 4단계: 형태학적 팽창 연산(Dilation) 및 윤곽 추출
                     extractContoursAndBoxes(diffMask, aligned, imgLeft);
 
-                    // 자원 완전 해제 (C++ 메모리 누수 원천 방지)
+                    // 자원 완전 해제
                     fullMat.delete();
                     imgLeft.delete();
                     imgRight.delete();
@@ -439,7 +461,7 @@
             cv.cvtColor(img1, gray1, cv.COLOR_RGBA2GRAY);
             cv.cvtColor(img2, gray2, cv.COLOR_RGBA2GRAY);
 
-            // 파이썬과 정밀도를 고대로 맞추기 위해 특징점 개수 2000 설정 [input_file_0.py]
+            // 특징점 탐지 수 2000 고정 [input_file_0.py]
             let orb = new cv.ORB(2000);
             let kp1 = new cv.KeyPointVector();
             let kp2 = new cv.KeyPointVector();
@@ -453,7 +475,6 @@
             let matches = new cv.DMatchVector();
             bf.match(des1, des2, matches);
 
-            // 유사도 기준 정렬
             let matchArray = [];
             for (let i = 0; i < matches.size(); i++) {
                 matchArray.push(matches.get(i));
@@ -462,7 +483,7 @@
 
             // 상위 10% 양호 유사 특징점 선별 [input_file_0.py]
             let numGoodMatches = Math.floor(matchArray.length * 0.1);
-            numGoodMatches = Math.max(4, numGoodMatches); // Homography 요구 최소 포인트
+            numGoodMatches = Math.max(4, numGoodMatches);
             numGoodMatches = Math.min(numGoodMatches, matchArray.length);
 
             let aligned = new cv.Mat();
@@ -481,7 +502,6 @@
                 let mat1 = cv.matFromArray(pts1.length / 2, 1, cv.CV_32FC2, pts1);
                 let mat2 = cv.matFromArray(pts2.length / 2, 1, cv.CV_32FC2, pts2);
 
-                // RANSAC 기반 랩 투영 행렬 유도
                 let H = cv.findHomography(mat2, mat1, cv.RANSAC, 5.0);
                 let dsize = new cv.Size(img1.cols, img1.rows);
                 let whiteScalar = new cv.Scalar(255, 255, 255, 255);
@@ -521,7 +541,7 @@
 
         // --- 정밀 윤곽 박스 마킹 및 스캔 준비 ---
         function extractContoursAndBoxes(diffMask, aligned, imgLeft) {
-            // 파이썬과 완벽히 일치하는 모폴로지 팽창 연산 (가로 방향 팽창 극대화 커널 구조) [input_file_0.py]
+            // 커널 세팅 복구 [input_file_0.py]
             let kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(20, 5));
             let dilated = new cv.Mat();
             cv.dilate(diffMask, dilated, kernel, new cv.Point(-1, -1), 2, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
@@ -539,7 +559,6 @@
                 }
             }
 
-            // 위에서 아래 방향(Y축) 정렬 적용 [input_file_0.py]
             contourRects.sort((a, b) => a.y - b.y);
 
             // 수정안 박싱 그리기
@@ -560,7 +579,7 @@
 
             cv.imshow(canvasLeft, imgLeft);
             cv.imshow(canvasRight, boxedMat);
-            cv.imshow(canvasAlignedHidden, aligned); // OCR 진행할 글자 왜곡 최소화용 히든 보존
+            cv.imshow(canvasAlignedHidden, aligned);
 
             // 하이라이트 오버레이 마스크 구축
             let overlayMat = imgLeft.clone();
@@ -608,9 +627,8 @@
                 if (sessionId !== currentOcrSessionId) return;
 
                 let rect = rects[i];
-                progressEl.innerHTML = `<i class="fa-solid fa-spinner animate-spin mr-1.5"></i>인공지능 판독 중: ${i + 1} / ${rects.length}`;
+                progressEl.innerHTML = `<i class="fa-solid fa-spinner animate-spin mr-1.5"></i>텍스트 해독 중: ${i + 1} / ${rects.length}`;
 
-                // 상하좌우 인식 여백 부여 [input_file_0.py 오프셋 이식]
                 let padding = 5;
                 let cropX = Math.max(0, rect.x - padding);
                 let cropY = Math.max(0, rect.y - padding);
@@ -674,7 +692,5 @@
             }
         }
     </script>
-    <!-- 가속 분산 고속 CDN을 통한 OpenCV.js 탑재 -->
-    <script async src="https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-alpha.0/dist/opencv.js" type="text/javascript"></script>
 </body>
 </html>
