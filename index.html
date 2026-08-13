@@ -209,13 +209,16 @@
 
             const loader = document.getElementById('loader');
             loader.classList.remove('hidden');
-            loader.classList.remove('opacity-0');
+            // 부드러운 전환 처리
+            setTimeout(() => {
+                loader.classList.remove('opacity-0');
+            }, 10);
+            
             updateLoadingBar(20, "연산 엔진 호출 중", "가로 정밀 기하 보정을 위한 OpenCV 핵심 모듈을 불러오고 있습니다.");
 
             const script = document.createElement('script');
             script.type = 'text/javascript';
             script.async = true;
-            script.src = "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-alpha.0/dist/opencv.js";
 
             window.Module = {
                 onRuntimeInitialized: function() {
@@ -239,6 +242,8 @@
                 setTimeout(() => loader.classList.add('hidden'), 3000);
             };
 
+            // 동적으로 스크립트 삽입하여 최초 페이지 로드 속도 0ms 보장
+            script.src = "https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-alpha.0/dist/opencv.js";
             document.body.appendChild(script);
         }
 
@@ -330,7 +335,7 @@
             reader.readAsDataURL(file);
         }
 
-        // 이미지가 실제로 브라우저 캐시에 올라오면, 온디맨드로 OpenCV 로드 후 프로세싱 시작!
+        // 이미지 로딩 시 온디맨드로 리소스를 확보함
         imgSrc.onload = function() {
             emptyState.classList.add('hidden');
             resultsLayout.classList.remove('hidden');
