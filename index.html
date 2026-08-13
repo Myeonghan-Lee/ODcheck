@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📑 스마트 문서 변동사항 탐지기</title>
+    <!-- Tailwind CSS (UI Styling) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Tesseract.js (Web OCR) -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans h-screen flex flex-col overflow-hidden">
+
+    <!-- 로딩 인디케이터 (OpenCV.js 로딩 완료 시 사라짐) -->
+    <div id="loader" class="fixed inset-0 bg-slate-900 bg-opacity-75 flex flex-col items-center justify-center z-50">
+        <div class="bg-white p-6 rounded-2xl shadow-2xl flex flex-col items-center max-w-sm w-full mx-4">
+            <div class="animate-spin rounded-full h-12 w-12 border-4 border-blue-600 border-t-transparent mb-4"></div>
+            <h3 class="text-lg font-bold text-slate-800 mb-1" id="loaderTitle">초기 라이브러리 준비 중...</h3>
+            <p class="text-sm text-slate-500 text-center mb-4" id="loaderDesc">OpenCV.js 엔진을 다운로드하고 가동하고 있습니다. (최초 로드 시 약간의 시간이 걸릴 수 있습니다)</p>
+            <div class="w-full bg-slate-100 rounded-full h-2">
+                <div class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: 10%" id="loaderBar"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 전체 화면 레이아웃 -->
+    <div class="flex flex-1 overflow-hidden">
+        <!-- 사이드바 -->
+        <aside class="w-80 bg-white border-r border-slate-200 p-6 flex flex-col gap-6 overflow-y-auto custom-scrollbar flex-shrink-0">
+            <div class="flex items-center gap-3">
+                <span class="text-3xl">📑</span>
+                <div>
+                    <h1 class="text-lg font-bold tracking-tight text-slate-900">문서 변동사항 탐지기</h1>
+                    <p class="text-xs text-slate-400">자바스크립트 기반 문서 비교기</p>
+                </div>
+            </div>
+
+            <hr class="border-slate-100">
+
+            <!-- 이미지 업로드 영역 -->
+            <div>
+                <label class="block text-sm font-semibold text-slate-700 mb-2">비교 이미지 업로드 (좌우 병합본)</label>
+                <div id="dropzone" class="border-2 border-dashed border-slate-200 hover:border-blue-500 rounded-xl p-4 text-center cursor-pointer bg-slate-50 hover:bg-blue-50/20 transition-all">
+                    <input type="file" id="fileInput" accept="image/*" class="hidden">
+                    <i class="fa-solid fa-cloud-arrow-up text-3xl text-slate-400 mb-2"></i>
+                    <p class="text-xs text-slate-500 font-medium">여기에 드래그하거나 파일을 클릭하여 업로드하세요</p>
+                </div>
+                <div id="fileInfo" class="hidden mt-2 text-xs text-slate-600 bg-slate-100 p-2 rounded flex items-center justify-between">
+                    <span id="fileName" class="truncate max-w-[180px]">image.png</span>
+                    <button id="btnRemoveFile" class="text-red-500 hover:text-red-700 font-bold">X</button>
+                </div>
+            </div>
+
+            <!-- 정렬 및 분석 파라미터 제어 -->
+            <div class="flex flex-col gap-4">
+                <div class="flex items-center justify-between">
+                    <label class="text-sm font-semibold text-slate-700" for="autoAlignToggle">특징점 자동 정렬 (ORB)</label>
+                    <input type="checkbox" id="autoAlignToggle" checked class="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500">
+                </div>
+
+                <div>
+                    <div class="flex justify-between text-xs font-semibold text-slate-600 mb-1">
+                        <span>수동 정렬 미세 조정 (X축)</span>
+                        <span id="offsetXLabel">0 px</span>
+                    </div>
+                    <input type="range" id="offsetX" min="-100" max="100" value="0" class="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600">
+                </div>
+
+                <div>
+                    <div class="flex justify-between text-xs font-semibold text-slate-600 mb-1">
+                        <span>수동 정렬 미세 조정 (Y축)</span>
+                        <span id="offsetYLabel">0 px</span>
+                    </div>
+                    <input type="range" id="offsetY" min="-100" max="100" value="0" class="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600">
+                </div>
+
+                <div>
+                    <div class="flex justify-between text-xs font-semibold text-slate-600 mb-1">
+                        <span>노이즈 무시 감도 (임계값)</span>
+                        <span id="thresholdValLabel">30</span>
+                    </div>
+                    <input type="range" id="thresholdVal" min="5" max="100" value="30" class="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-semibold text-slate-600 mb-1">문서 인식 언어 (OCR)</label>
+                    <select id="ocrLanguage" class="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-700">
+                        <option value="kor+eng">한국어 + 영어 혼용</option>
+                        <option value="kor">한국어 전용</option>
+                        <option value="eng">영어 전용</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- 하단 제작 정보 -->
+            <div class="mt-auto pt-4 border-t border-slate-100 text-[10px] text-slate-400 text-center">
+                Powered by OpenCV.js & Tesseract.js
+            </div>
+        </aside>
+
+        <!-- 메인 콘텐츠 영역 -->
+        <main class="flex-1 flex flex-col bg-slate-50 overflow-hidden">
+            <!-- 안내 안내창 (업로드 전 표출) -->
+            <div id="emptyState" class="flex-1 flex flex-col items-center justify-center p-8 text-center">
+                <div class="bg-white p-8 rounded-2xl shadow-sm border border-slate-200/50 max-w-md">
+                    <span class="text-5xl mb-4 block">👈</span>
+                    <h2 class="text-xl font-bold text-slate-800 mb-2">비교할 문서를 등록해 주세요</h2>
+                    <p class="text-sm text-slate-500 leading-relaxed">
+                        왼쪽 사이드바의 업로더를 통해 **비교 대상 문서의 원본과 수정본이 좌우로 붙어있는 가로 병합 파일**을 업로드하면 변동사항이 자동으로 감지됩니다.
+                    </p>
+                </div>
+            </div>
+
+            <!-- 분석 결과 뷰 (업로드 완료 시 활성화) -->
+            <div id="resultsLayout" class="hidden flex-1 flex flex-col overflow-hidden">
+                <!-- 탭 메뉴 헤더 -->
+                <div class="bg-white border-b border-slate-200 px-8 flex flex-shrink-0">
+                    <button id="tabBtn1" class="py-4 px-6 border-b-2 border-blue-600 text-blue-600 font-semibold text-sm transition-all focus:outline-none flex items-center gap-2">
+                        <i class="fa-solid fa-chart-line"></i> 분석 결과 시각화
+                    </button>
+                    <button id="tabBtn2" class="py-4 px-6 border-b-2 border-transparent text-slate-500 hover:text-slate-800 font-medium text-sm transition-all focus:outline-none flex items-center gap-2">
+                        <i class="fa-solid fa-file-invoice"></i> 📝 추출된 텍스트
+                    </button>
+                </div>
+
+                <!-- 탭 콘텐츠 바디 -->
+                <div class="flex-1 overflow-y-auto p-8 custom-scrollbar">
+                    
+                    <!-- TAB 1: 분석 시각화 -->
+                    <div id="tabContent1" class="flex flex-col gap-8">
+                        <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                            <!-- 초안 원본 (좌) -->
+                            <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200/50">
+                                <h3 class="text-sm font-bold text-slate-700 mb-3"><span class="text-blue-500 mr-1.5">●</span>초안 (왼쪽)</h3>
+                                <div class="overflow-auto border bg-slate-50 rounded-lg flex items-center justify-center max-h-[500px]">
+                                    <canvas id="canvasLeft" class="max-w-full h-auto object-contain"></canvas>
+                                </div>
+                            </div>
+                            <!-- 수정안 탐지 구역 (우) -->
+                            <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200/50">
+                                <h3 class="text-sm font-bold text-slate-700 mb-3"><span class="text-red-500 mr-1.5">●</span>수정안 (오른쪽 - 감지 구역)</h3>
+                                <div class="overflow-auto border bg-slate-50 rounded-lg flex items-center justify-center max-h-[500px]">
+                                    <canvas id="canvasRight" class="max-w-full h-auto object-contain"></canvas>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 전체 오버레이 강조 영역 -->
+                        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200/50">
+                            <h3 class="text-sm font-bold text-slate-700 mb-1"><span class="text-rose-500 mr-1.5">●</span>변동 영역 하이라이트</h3>
+                            <p class="text-xs text-slate-400 mb-4">수정본의 변동 영역만을 빨간색 마스크 형태로 원본과 대조하여 표시합니다.</p>
+                            <div class="overflow-auto border bg-slate-50 rounded-lg flex items-center justify-center max-h-[600px] p-2">
+                                <canvas id="canvasOverlay" class="max-w-full h-auto object-contain"></canvas>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- TAB 2: 추출된 텍스트 결과 -->
+                    <div id="tabContent2" class="hidden flex flex-col gap-4 max-w-4xl mx-auto">
+                        <div class="bg-white p-6 rounded-xl shadow-sm border border-slate-200/50">
+                            <div class="flex items-center justify-between mb-4">
+                                <h3 class="text-base font-bold text-slate-800">🔍 실시간 텍스트 추출 목록</h3>
+                                <span id="ocrProgress" class="hidden text-xs bg-blue-50 text-blue-600 px-3 py-1 rounded-full font-medium"></span>
+                            </div>
+                            <!-- 카드 묶음 -->
+                            <div id="ocrResultsList" class="flex flex-col gap-4">
+                                <!-- 여기에 비동기로 결과가 바인딩됩니다 -->
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- 임시 처리를 위한 보이지 않는 공간 -->
+    <img id="imgSrc" class="hidden" alt="source_element">
+    <canvas id="canvasAlignedHidden" class="hidden"></canvas>
+
+    <!-- OpenCV 라이브러리 및 자바스크립트 로직 연동 -->
+    <script>
+        let opencvReady = false;
+        let originalImg = null;
+
+        // OpenCV.js 완료 콜백 인터페이스 사전 선언
+        var Module = {
+            onRuntimeInitialized: function() {
+                console.log("OpenCV.js Ready");
+                opencvReady = true;
+                updateLoadingBar(100, "준비 완료!", "모든 인공지능 분석 시스템이 활성화되었습니다.");
+                setTimeout(() => {
+                    document.getElementById('loader').classList.add('opacity-0');
+                    setTimeout(() => document.getElementById('loader').classList.add('hidden'), 300);
+                }, 600);
+            }
+        };
+
+        // 로더 프로그레스 바 제어
+        function updateLoadingBar(pct, title, desc) {
+            document.getElementById('loaderBar').style.width = pct + '%';
+            if (title) document.getElementById('loaderTitle').innerText = title;
+            if (desc) document.getElementById('loaderDesc').innerText = desc;
+        }
+
+        // 초기 시작 시 로딩 모션
+        let initProgress = 10;
+        let initTimer = setInterval(() => {
+            if (initProgress < 85 && !opencvReady) {
+                initProgress += Math.floor(Math.random() * 8) + 2;
+                updateLoadingBar(initProgress);
+            } else {
+                clearInterval(initTimer);
+            }
+        }, 300);
+
+        // --- DOM Elements ---
+        const fileInput = document.getElementById('fileInput');
+        const dropzone = document.getElementById('dropzone');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileNameEl = document.getElementById('fileName');
+        const btnRemoveFile = document.getElementById('btnRemoveFile');
+        const emptyState = document.getElementById('emptyState');
+        const resultsLayout = document.getElementById('resultsLayout');
+        const imgSrc = document.getElementById('imgSrc');
+
+        // --- Sliders & Controls ---
+        const autoAlignToggle = document.getElementById('autoAlignToggle');
+        const offsetX = document.getElementById('offsetX');
+        const offsetY = document.getElementById('offsetY');
+        const thresholdVal = document.getElementById('thresholdVal');
+        const ocrLanguage = document.getElementById('ocrLanguage');
+
+        const offsetXLabel = document.getElementById('offsetXLabel');
+        const offsetYLabel = document.getElementById('offsetYLabel');
+        const thresholdValLabel = document.getElementById('thresholdValLabel');
+
+        // --- Tab Switching ---
+        const tabBtn1 = document.getElementById('tabBtn1');
+        const tabBtn2 = document.getElementById('tabBtn2');
+        const tabContent1 = document.getElementById('tabContent1');
+        const tabContent2 = document.getElementById('tabContent2');
+
+        tabBtn1.addEventListener('click', () => switchTab(1));
+        tabBtn2.addEventListener('click', () => switchTab(2));
+
+        function switchTab(tabNum) {
+            if (tabNum === 1) {
+                tabBtn1.className = "py-4 px-6 border-b-2 border-blue-600 text-blue-600 font-semibold text-sm focus:outline-none flex items-center gap-2";
+                tabBtn2.className = "py-4 px-6 border-b-2 border-transparent text-slate-500 hover:text-slate-800 font-medium text-sm focus:outline-none flex items-center gap-2";
+                tabContent1.classList.remove('hidden');
+                tabContent2.classList.add('hidden');
+            } else {
+                tabBtn2.className = "py-4 px-6 border-b-2 border-blue-600 text-blue-600 font-semibold text-sm focus:outline-none flex items-center gap-2";
+                tabBtn1.className = "py-4 px-6 border-b-2 border-transparent text-slate-500 hover:text-slate-800 font-medium text-sm focus:outline-none flex items-center gap-2";
+                tabContent2.classList.remove('hidden');
+                tabContent1.classList.add('hidden');
+            }
+        }
+
+        // --- Drag and Drop Logic ---
+        dropzone.addEventListener('click', () => fileInput.click());
+        dropzone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropzone.className = "border-2 border-dashed border-blue-500 rounded-xl p-4 text-center cursor-pointer bg-blue-50/50 transition-all";
+        });
+        dropzone.addEventListener('dragleave', () => {
+            dropzone.className = "border-2 border-dashed border-slate-200 hover:border-blue-500 rounded-xl p-4 text-center cursor-pointer bg-slate-50 hover:bg-blue-50/20 transition-all";
+        });
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files.length > 0) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        btnRemoveFile.addEventListener('click', (e) => {
+            e.stopPropagation();
+            resetState();
+        });
+
+        function handleFile(file) {
+            fileNameEl.innerText = file.name;
+            dropzone.classList.add('hidden');
+            fileInfo.classList.remove('hidden');
+            
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                imgSrc.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        imgSrc.onload = function() {
+            emptyState.classList.add('hidden');
+            resultsLayout.classList.remove('hidden');
+            // 분석 시작
+            processDocument();
+        };
+
+        function resetState() {
+            fileInput.value = "";
+            imgSrc.src = "";
+            dropzone.classList.remove('hidden');
+            fileInfo.classList.add('hidden');
+            emptyState.classList.remove('hidden');
+            resultsLayout.classList.add('hidden');
+            document.getElementById('ocrResultsList').innerHTML = "";
+            offsetX.value = 0;
+            offsetY.value = 0;
+            offsetXLabel.innerText = "0 px";
+            offsetYLabel.innerText = "0 px";
+        }
+
+        // --- 컨트롤러 변경 리스너 (실시간 분석 업데이트) ---
+        offsetX.addEventListener('input', (e) => {
+            offsetXLabel.innerText = `${e.target.value} px`;
+            debounceProcess();
+        });
+        offsetY.addEventListener('input', (e) => {
+            offsetYLabel.innerText = `${e.target.value} px`;
+            debounceProcess();
+        });
+        thresholdVal.addEventListener('input', (e) => {
+            thresholdValLabel.innerText = e.target.value;
+            debounceProcess();
+        });
+        autoAlignToggle.addEventListener('change', () => processDocument());
+        ocrLanguage.addEventListener('change', () => processDocument());
+
+        let debounceTimeout;
+        function debounceProcess() {
+            clearTimeout(debounceTimeout);
+            debounceTimeout = setTimeout(() => {
+                processDocument();
+            }, 350);
+        }
+
+        // --- 핵심 이미지 정렬 & 탐지 비즈니스 로직 ---
+        function processDocument() {
+            if (!opencvReady || !imgSrc.src) return;
+
+            try {
+                // 원본 전체 행렬 가져오기
+                let fullMat = cv.imread(imgSrc);
+                let H = fullMat.rows;
+                let W = fullMat.cols;
+                let mid = Math.floor(W / 2);
+
+                // 좌/우 반으로 나누기
+                let rectLeft = new cv.Rect(0, 0, mid, H);
+                let rectRight = new cv.Rect(mid, 0, W - mid, H);
+
+                let imgLeft = fullMat.roi(rectLeft);
+                let imgRight = fullMat.roi(rectRight);
+
+                let aligned = new cv.Mat();
+
+                // 1단계: 자동 정렬 (체크박스 활성화 시)
+                let tempAligned = new cv.Mat();
+                if (autoAlignToggle.checked) {
+                    try {
+                        tempAligned = alignImagesORB(imgLeft, imgRight);
+                    } catch (err) {
+                        console.warn("ORB alignment failed. Using unaligned fallback.", err);
+                        imgRight.copyTo(tempAligned);
+                    }
+                } else {
+                    imgRight.copyTo(tempAligned);
+                }
+
+                // 2단계: 수동 제어 이동 변환 (Affine Warp)
+                let xOff = parseInt(offsetX.value);
+                let yOff = parseInt(offsetY.value);
+
+                if (xOff !== 0 || yOff !== 0) {
+                    let transMat = cv.matFromArray(2, 3, cv.CV_32F, [1, 0, xOff, 0, 1, yOff]);
+                    let dsize = new cv.Size(tempAligned.cols, tempAligned.rows);
+                    cv.warpAffine(tempAligned, aligned, transMat, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 255));
+                    transMat.delete();
+                    tempAligned.delete();
+                } else {
+                    aligned = tempAligned;
+                }
+
+                // 3단계: 차이 분석 마스크 획득
+                let threshValue = parseInt(thresholdVal.value);
+                let diffMask = getDiffMask(imgLeft, aligned, threshValue);
+
+                // 4단계: 차이 영역 윤곽(Contours) 계산 및 박스 그리기
+                extractAndRenderContours(diffMask, aligned, imgLeft);
+
+                // 자원 해제(C++ 바인딩 해제 필수)
+                fullMat.delete();
+                imgLeft.delete();
+                imgRight.delete();
+                aligned.delete();
+                diffMask.delete();
+
+            } catch (err) {
+                console.error("Image processing error:", err);
+            }
+        }
+
+        // --- ORB 알고리즘 기반 이미지 자동 정렬 기능 ---
+        function alignImagesORB(img1, img2) {
+            let gray1 = new cv.Mat();
+            let gray2 = new cv.Mat();
+            cv.cvtColor(img1, gray1, cv.COLOR_RGBA2GRAY);
+            cv.cvtColor(img2, gray2, cv.COLOR_RGBA2GRAY);
+
+            let orb = new cv.ORB(2000);
+            let kp1 = new cv.KeyPointVector();
+            let kp2 = new cv.KeyPointVector();
+            let des1 = new cv.Mat();
+            let des2 = new cv.Mat();
+
+            orb.detectAndCompute(gray1, new cv.Mat(), kp1, des1);
+            orb.detectAndCompute(gray2, new cv.Mat(), kp2, des2);
+
+            let bf = new cv.BFMatcher(cv.NORM_HAMMING, true);
+            let matches = new cv.DMatchVector();
+            bf.match(des1, des2, matches);
+
+            // 매칭 정보 정렬
+            let matchArray = [];
+            for (let i = 0; i < matches.size(); i++) {
+                matchArray.push(matches.get(i));
+            }
+            matchArray.sort((a, b) => a.distance - b.distance);
+
+            // 상위 10% 양호 점만 선별 (최소 4개 이상 매칭 필요)
+            let numGood = Math.max(4, Math.floor(matchArray.length * 0.1));
+            numGood = Math.min(numGood, matchArray.length);
+
+            let aligned = new cv.Mat();
+
+            if (numGood >= 4) {
+                let pts1 = [];
+                let pts2 = [];
+                for (let i = 0; i < numGood; i++) {
+                    let m = matchArray[i];
+                    let p1 = kp1.get(m.trainIdx).pt;
+                    let p2 = kp2.get(m.queryIdx).pt;
+                    pts1.push(p1.x, p1.y);
+                    pts2.push(p2.x, p2.y);
+                }
+
+                let mat1 = cv.matFromArray(pts1.length / 2, 1, cv.CV_32FC2, pts1);
+                let mat2 = cv.matFromArray(pts2.length / 2, 1, cv.CV_32FC2, pts2);
+
+                let H = cv.findHomography(mat2, mat1, cv.RANSAC, 5.0);
+                let dsize = new cv.Size(img1.cols, img1.rows);
+                cv.warpPerspective(img2, aligned, H, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar(255, 255, 255, 255));
+
+                mat1.delete();
+                mat2.delete();
+                H.delete();
+            } else {
+                img2.copyTo(aligned);
+            }
+
+            gray1.delete(); gray2.delete(); kp1.delete(); kp2.delete(); des1.delete(); des2.delete(); matches.delete(); bf.delete(); orb.delete();
+            return aligned;
+        }
+
+        // --- 차이 마스크 계산 구현 ---
+        function getDiffMask(img1, img2, thresholdVal) {
+            let diff = new cv.Mat();
+            cv.absdiff(img1, img2, diff);
+
+            let diffGray = new cv.Mat();
+            cv.cvtColor(diff, diffGray, cv.COLOR_RGBA2GRAY);
+
+            let diffBlur = new cv.Mat();
+            let ksize = new cv.Size(5, 5);
+            cv.GaussianBlur(diffGray, diffBlur, ksize, 0, 0, cv.BORDER_DEFAULT);
+
+            let diffMask = new cv.Mat();
+            cv.threshold(diffBlur, diffMask, thresholdVal, 255, cv.THRESH_BINARY);
+
+            diff.delete();
+            diffGray.delete();
+            diffBlur.delete();
+            return diffMask;
+        }
+
+        // --- 윤곽 검출 및 시각화 렌더링 ---
+        function extractAndRenderContours(diffMask, aligned, imgLeft) {
+            // 구조 커널화 팽창 연산 진행 (수정 가시성 극대화)
+            let kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(20, 5));
+            let dilated = new cv.Mat();
+            cv.dilate(diffMask, dilated, kernel, new cv.Point(-1, -1), 2, cv.BORDER_CONSTANT, cv.morphologyDefaultBorderValue());
+
+            let contours = new cv.MatVector();
+            let hierarchy = new cv.Mat();
+            cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+            let contourRects = [];
+            for (let i = 0; i < contours.size(); ++i) {
+                let cnt = contours.get(i);
+                let rect = cv.boundingRect(cnt);
+                // 노이즈가 아닌 적정 크기(가로20, 세로10 이상)의 박스 필터링
+                if (rect.width > 20 && rect.height > 10) {
+                    contourRects.push(rect);
+                }
+            }
+
+            // 위에서 아래로 Y좌표 정렬 (순서 일관성 보장)
+            contourRects.sort((a, b) => a.y - b.y);
+
+            // 수정안 박싱 렌더링
+            let boxedMat = aligned.clone();
+            let redColor = new cv.Scalar(239, 68, 68, 255); // Tailwind Red-500
+            for (let i = 0; i < contourRects.length; i++) {
+                let rect = contourRects[i];
+                let p1 = new cv.Point(rect.x, rect.y);
+                let p2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
+                cv.rectangle(boxedMat, p1, p2, redColor, 2);
+            }
+
+            // 최종 캔버스 드로잉
+            const canvasLeft = document.getElementById('canvasLeft');
+            const canvasRight = document.getElementById('canvasRight');
+            const canvasOverlay = document.getElementById('canvasOverlay');
+            const canvasAlignedHidden = document.getElementById('canvasAlignedHidden');
+
+            cv.imshow(canvasLeft, imgLeft);
+            cv.imshow(canvasRight, boxedMat);
+            cv.imshow(canvasAlignedHidden, aligned); // OCR 크롭용 클린 버전 히든 백업
+
+            // 변동 영역 하이라이트 오버레이 생성
+            let overlayMat = imgLeft.clone();
+            let redMat = new cv.Mat(imgLeft.rows, imgLeft.cols, imgLeft.type(), new cv.Scalar(239, 68, 68, 255));
+            redMat.copyTo(overlayMat, diffMask);
+            cv.imshow(canvasOverlay, overlayMat);
+
+            // 자원 제거
+            kernel.delete();
+            dilated.delete();
+            contours.delete();
+            hierarchy.delete();
+            boxedMat.delete();
+            overlayMat.delete();
+            redMat.delete();
+
+            // 텍스트 비동기 인식 프로세스 연쇄 호출
+            recognizeChangedTexts(contourRects, canvasAlignedHidden);
+        }
+
+        // --- Tesseract OCR 비동기 병렬화 최적화 구현 ---
+        let currentOcrSessionId = 0;
+
+        async function recognizeChangedTexts(rects, cleanCanvas) {
+            const listContainer = document.getElementById('ocrResultsList');
+            listContainer.innerHTML = "";
+
+            if (rects.length === 0) {
+                listContainer.innerHTML = `
+                    <div class="text-center py-12 text-slate-400">
+                        <i class="fa-solid fa-face-smile text-4xl mb-2 block"></i>
+                        <p class="text-sm">감지된 변경 사항이 없습니다.</p>
+                    </div>`;
+                return;
+            }
+
+            // 슬라이더 마구 움직일 때 중복 방지를 위한 세션 키 처리
+            const sessionId = ++currentOcrSessionId;
+            const progressEl = document.getElementById('ocrProgress');
+            const ocrLang = ocrLanguage.value;
+
+            progressEl.classList.remove('hidden');
+            progressEl.innerHTML = `<i class="fa-solid fa-spinner animate-spin mr-1.5"></i>분석 중: 0 / ${rects.length}`;
+
+            for (let i = 0; i < rects.length; i++) {
+                if (sessionId !== currentOcrSessionId) return; // 이전 세션 오버랩 정지
+
+                let rect = rects[i];
+                progressEl.innerHTML = `<i class="fa-solid fa-spinner animate-spin mr-1.5"></i>인식 중: ${i + 1} / ${rects.length}`;
+
+                // 여백을 약간 확장하여 텍스트 누락 방지
+                let padding = 6;
+                let cropX = Math.max(0, rect.x - padding);
+                let cropY = Math.max(0, rect.y - padding);
+                let cropW = Math.min(cleanCanvas.width - cropX, rect.width + padding * 2);
+                let cropH = Math.min(cleanCanvas.height - cropY, rect.height + padding * 2);
+
+                let cropCanvas = document.createElement('canvas');
+                cropCanvas.width = cropW;
+                cropCanvas.height = cropH;
+                let cropCtx = cropCanvas.getContext('2d');
+                cropCtx.drawImage(cleanCanvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+                const cardId = `ocr-card-${i}`;
+                const cardHtml = `
+                    <div id="${cardId}" class="p-4 bg-white rounded-xl shadow-sm border border-slate-100 flex gap-4 items-center animate-pulse">
+                        <div class="flex-shrink-0 w-28 h-12 bg-slate-50 rounded border flex items-center justify-center overflow-hidden">
+                            <img id="${cardId}-thumb" class="max-w-full max-h-full object-contain" />
+                        </div>
+                        <div class="flex-grow">
+                            <div class="h-3.5 bg-slate-200 rounded w-1/5 mb-2"></div>
+                            <div class="h-3 bg-slate-100 rounded w-1/2"></div>
+                        </div>
+                    </div>`;
+                listContainer.insertAdjacentHTML('beforeend', cardHtml);
+                document.getElementById(`${cardId}-thumb`).src = cropCanvas.toDataURL();
+
+                try {
+                    // Tesseract.js 인공지능 해독 처리
+                    const res = await Tesseract.recognize(cropCanvas, ocrLang);
+                    const text = res.data.text.trim();
+
+                    if (sessionId !== currentOcrSessionId) return;
+
+                    const cardEl = document.getElementById(cardId);
+                    cardEl.classList.remove('animate-pulse');
+                    cardEl.innerHTML = `
+                        <div class="flex-shrink-0 w-28 h-12 bg-slate-50 rounded border flex items-center justify-center overflow-hidden">
+                            <img src="${cropCanvas.toDataURL()}" class="max-w-full max-h-full object-contain" />
+                        </div>
+                        <div class="flex-grow">
+                            <div class="text-xs text-blue-600 font-bold mb-1">변경 구간 ${i + 1}</div>
+                            <div class="text-slate-800 text-sm font-medium bg-slate-50/70 p-2 rounded-lg border border-slate-100 whitespace-pre-wrap">${text || '<span class="text-slate-300">(인식된 글자가 없습니다)</span>'}</div>
+                        </div>`;
+
+                } catch (ocrErr) {
+                    console.error("OCR Error on index", i, ocrErr);
+                    const cardEl = document.getElementById(cardId);
+                    cardEl.classList.remove('animate-pulse');
+                    cardEl.innerHTML = `
+                        <div class="flex-shrink-0 w-28 h-12 bg-rose-50 rounded border border-rose-100 flex items-center justify-center">
+                            <i class="fa-solid fa-triangle-exclamation text-rose-500"></i>
+                        </div>
+                        <div class="flex-grow">
+                            <div class="text-xs text-rose-600 font-bold mb-1">변경 구간 ${i + 1}</div>
+                            <div class="text-rose-500 text-xs">텍스트 인식 실패</div>
+                        </div>`;
+                }
+            }
+
+            if (sessionId === currentOcrSessionId) {
+                progressEl.innerHTML = `<i class="fa-solid fa-check mr-1.5"></i>완료: 총 ${rects.length}개 분석됨`;
+            }
+        }
+    </script>
+    <!-- OpenCV.js 핵심 비동기 주입 -->
+    <script async src="https://docs.opencv.org/4.10.0/opencv.js" type="text/javascript"></script>
+</body>
+</html>
